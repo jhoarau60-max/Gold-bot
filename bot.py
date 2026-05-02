@@ -42,7 +42,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+# Debug: afficher toutes les variables disponibles
+logger.info("=== VARIABLES DISPONIBLES ===")
+for k, v in os.environ.items():
+    if any(x in k.upper() for x in ["TOKEN", "TELEGRAM", "JOHN", "GEMINI", "CAPITAL"]):
+        logger.info(f"  {k} = {'[SET]' if v else '[EMPTY]'}")
+logger.info("=== FIN VARIABLES ===")
+
+TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "").strip()
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN manquant! Variables: " + str(list(os.environ.keys())))
+    raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(os.environ.get("JOHN_ID", "0"))
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
 CAPITAL_INITIAL = float(os.environ.get("CAPITAL", "50000"))
