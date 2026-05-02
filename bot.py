@@ -42,20 +42,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Debug: afficher toutes les variables disponibles
-logger.info("=== VARIABLES DISPONIBLES ===")
-for k, v in os.environ.items():
-    if any(x in k.upper() for x in ["TOKEN", "TELEGRAM", "JOHN", "GEMINI", "CAPITAL"]):
-        logger.info(f"  {k} = {'[SET]' if v else '[EMPTY]'}")
-logger.info("=== FIN VARIABLES ===")
+# Nettoyer les noms de variables (espaces parasites possibles dans Railway)
+ENV = {k.strip(): v.strip() for k, v in os.environ.items()}
 
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_TOKEN  = ENV.get("TELEGRAM_TOKEN", "")
 if not TELEGRAM_TOKEN:
-    logger.error("TELEGRAM_TOKEN manquant! Variables: " + str(list(os.environ.keys())))
+    logger.error("TELEGRAM_TOKEN manquant! Clés dispo: " + str([k for k in ENV if "TOKEN" in k.upper() or "TELEGRAM" in k.upper()]))
     raise SystemExit("TELEGRAM_TOKEN requis")
-JOHN_ID         = int(os.environ.get("JOHN_ID", "0"))
-GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-CAPITAL_INITIAL = float(os.environ.get("CAPITAL", "50000"))
+JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
+GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
+CAPITAL_INITIAL = float(ENV.get("CAPITAL", "50000"))
 RISK_PER_TRADE  = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
 MAX_DAILY_LOSS  = 0.02   # 2 % de perte max par jour
 TZ              = pytz.timezone("Europe/Brussels")
