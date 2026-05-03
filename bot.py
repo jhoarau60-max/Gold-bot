@@ -34,6 +34,7 @@ import matplotlib.patches as mpatches
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import google.generativeai as genai
+from supabase import create_client, Client
 
 # ── CONFIGURATION ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -52,6 +53,22 @@ if not TELEGRAM_TOKEN:
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
 CAPITAL_INITIAL = float(ENV.get("CAPITAL", "50000"))
+
+SUPABASE_URL     = ENV.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = ENV.get("SUPABASE_SERVICE_KEY", "")
+sb_client: Client | None = None
+if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    try:
+        sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        logger.info("Supabase connecté")
+    except Exception as e:
+        logger.error(f"Supabase connexion échouée: {e}")
+
+TICKER_TO_BOT = {
+    "XAUUSD=X": "gold",
+    "XAGUSD=X": "silver",
+    "BTC-USD":  "oracle",
+}
 RISK_PER_TRADE  = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
 MAX_DAILY_LOSS  = 0.02   # 2 % de perte max par jour
 TZ              = pytz.timezone("Europe/Brussels")
@@ -382,6 +399,23 @@ def open_trade(data: dict, ticker: str, direction: str,
     data["open_positions"].append(pos)
     data["daily_trades"] += 1
     save_data(data)
+
+    if sb_client:
+        try:
+            res = sb_client.table("trade_history").insert({
+                "bot":         TICKER_TO_BOT.get(ticker, "gold"),
+                "symbol":      ticker,
+                "direction":   direction,
+                "price_entry": round(price, 5),
+                "status":      "open",
+                "opened_at":   datetime.now(TZ).isoformat(),
+            }).execute()
+            if res.data:
+                pos["supabase_id"] = res.data[0]["id"]
+                save_data(data)
+        except Exception as e:
+            logger.error(f"Supabase insert trade: {e}")
+
     return pos
 
 def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
@@ -417,6 +451,17 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
             else:
                 data["loss_streak"] = data.get("loss_streak", 0) + 1
                 data["win_streak"]  = 0
+            if sb_client and "supabase_id" in pos:
+                try:
+                    sb_client.table("trade_history").update({
+                        "price_exit": round(price, 5),
+                        "pnl":        round(pnl, 2),
+                        "status":     "closed",
+                        "closed_at":  datetime.now(TZ).isoformat(),
+                    }).eq("id", pos["supabase_id"]).execute()
+                except Exception as e:
+                    logger.error(f"Supabase update trade: {e}")
+
             closed.append((pos, reason))
         else:
             remaining.append(pos)
