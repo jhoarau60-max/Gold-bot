@@ -20,9 +20,11 @@ import os
 import json
 import logging
 import io
+import re
 from datetime import datetime
 
 import pytz
+import feedparser
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -368,6 +370,41 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
     return None, max(score_buy, score_sell), reasons
 
 
+# ── MISE À JOUR PROFILES INVESTISSEURS ────────────────────────────────────────
+def update_investor_profiles(pnl: float):
+    """Distribue 70% du P&L du trade à tous les investisseurs proportionnellement."""
+    if not sb_client or pnl == 0:
+        return
+    try:
+        res = sb_client.table("profiles").select("id, capital_initial, capital_current, pnl_total").execute()
+        profiles_data = res.data or []
+        if not profiles_data:
+            return
+
+        total_capital = sum(float(p.get("capital_initial") or 0) for p in profiles_data)
+        if total_capital <= 0:
+            return
+
+        investor_share = pnl * 0.70
+
+        for p in profiles_data:
+            cap_init = float(p.get("capital_initial") or 0)
+            if cap_init <= 0:
+                continue
+            weight      = cap_init / total_capital
+            gain        = investor_share * weight
+            new_capital = float(p.get("capital_current") or cap_init) + gain
+            new_pnl     = float(p.get("pnl_total") or 0) + gain
+            sb_client.table("profiles").update({
+                "capital_current": round(new_capital, 2),
+                "pnl_total":       round(new_pnl, 2),
+            }).eq("id", p["id"]).execute()
+
+        logger.info(f"Profiles mis à jour — P&L: {pnl:+.2f} EUR distribué à {len(profiles_data)} investisseurs")
+    except Exception as e:
+        logger.error(f"Supabase update profiles: {e}")
+
+
 # ── GESTION DES POSITIONS ──────────────────────────────────────────────────────
 def open_trade(data: dict, ticker: str, direction: str,
                price: float, atr: float, score: int) -> dict | None:
@@ -464,6 +501,8 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
                     }).eq("id", pos["supabase_id"]).execute()
                 except Exception as e:
                     logger.error(f"Supabase update trade: {e}")
+
+            update_investor_profiles(pnl)
 
             closed.append((pos, reason))
         else:
@@ -705,6 +744,186 @@ Sois précis, factuel, et pense comme un professionnel gérant des millions."""
     except Exception as e:
         logger.error(f"Erreur IA: {e}")
         return f"Analyse IA indisponible ({str(e)[:80]})"
+
+
+# ── POLARIS ORACLE — RSS + IA PRÉDICTIVE ──────────────────────────────────────
+ORACLE_RSS_FEEDS = [
+    "https://cointelegraph.com/rss",
+    "https://cryptopanic.com/news/rss/",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cryptoslate.com/feed/",
+    "https://www.theblock.co/rss.xml",
+]
+
+ORACLE_KEYWORDS = [
+    "bitcoin", "btc", "crypto", "fed", "inflation", "interest rate", "etf",
+    "sec", "regulation", "whale", "halving", "macro", "recession", "dollar",
+    "rate hike", "monetary", "blackrock", "microstrategy", "coinbase", "fomc",
+    "cpi", "gdp", "tariff", "sanctions", "war", "geopolit",
+]
+
+
+def fetch_oracle_news(hours_back: int = 2) -> list[dict]:
+    from email.utils import parsedate_to_datetime
+    articles = []
+    cutoff = datetime.now(pytz.utc) - pd.Timedelta(hours=hours_back)
+
+    for url in ORACLE_RSS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:25]:
+                title   = entry.get("title", "")
+                summary = entry.get("summary", "")[:300]
+                text_lower = (title + " " + summary).lower()
+                if not any(kw in text_lower for kw in ORACLE_KEYWORDS):
+                    continue
+                try:
+                    pub_dt = parsedate_to_datetime(entry.get("published", ""))
+                    if pub_dt.tzinfo is None:
+                        pub_dt = pub_dt.replace(tzinfo=pytz.utc)
+                    if pub_dt < cutoff:
+                        continue
+                except Exception:
+                    pass
+                articles.append({
+                    "title":   title,
+                    "summary": summary,
+                    "source":  feed.feed.get("title", url),
+                })
+        except Exception as e:
+            logger.warning(f"Oracle RSS {url}: {e}")
+
+    seen, unique = set(), []
+    for a in articles:
+        if a["title"] not in seen:
+            seen.add(a["title"])
+            unique.append(a)
+    return unique[:15]
+
+
+async def oracle_ai_signal(articles: list[dict], btc_df: pd.DataFrame) -> dict:
+    if not GEMINI_API_KEY:
+        return {"direction": None, "confidence": 0, "summary": "Clé Gemini manquante"}
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model  = genai.GenerativeModel("gemini-2.5-flash")
+        btc_df = compute_indicators(btc_df)
+        c      = btc_df["Close"].squeeze()
+        price  = float(c.iloc[-1])
+        rsi    = float(btc_df["RSI"].iloc[-1])
+        adx    = float(btc_df["ADX"].iloc[-1])
+        ema200 = float(btc_df["EMA200"].iloc[-1])
+        chg24  = float((c.iloc[-1] / c.iloc[-24] - 1) * 100) if len(c) >= 24 else 0
+
+        news_text = "\n".join([
+            f"- [{a['source']}] {a['title']} — {a['summary'][:150]}"
+            for a in articles
+        ])
+
+        prompt = f"""Tu es Polaris Oracle — IA prédictive Bitcoin niveau institutionnel.
+Tu analyses actualités macro + crypto pour prédire la direction à court terme.
+
+ACTUALITÉS RÉCENTES (dernières {len(articles)} heures) :
+{news_text}
+
+DONNÉES TECHNIQUES BTC/USD :
+- Prix : {price:.2f}$ | Variation 24h : {chg24:+.2f}%
+- RSI : {rsi:.1f} | ADX : {adx:.1f}
+- EMA200 : {ema200:.2f} | Tendance : {"HAUSSIÈRE" if price > ema200 else "BAISSIÈRE"}
+
+Réponds UNIQUEMENT en JSON valide, exactement ce format :
+{{
+  "direction": "BUY" ou "SELL" ou "NEUTRAL",
+  "confidence": <0-100>,
+  "timeframe": "4h" ou "12h" ou "24h",
+  "catalysts": ["raison 1", "raison 2"],
+  "risk": "LOW" ou "MEDIUM" ou "HIGH",
+  "summary": "<1 phrase>"
+}}
+
+Si pas d'info claire → NEUTRAL confidence < 50."""
+
+        resp      = model.generate_content(prompt)
+        json_match = re.search(r'\{.*\}', resp.text.strip(), re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        return {"direction": None, "confidence": 0, "summary": "Réponse non parsable"}
+    except Exception as e:
+        logger.error(f"Oracle AI: {e}")
+        return {"direction": None, "confidence": 0, "summary": str(e)[:80]}
+
+
+async def oracle_loop(app: Application):
+    logger.info("Polaris Oracle démarré — analyse RSS toutes les heures, 24h/24")
+    last_hour = ""
+    while True:
+        try:
+            now      = datetime.now(TZ)
+            now_hour = now.strftime("%Y-%m-%d-%H")
+
+            if now_hour != last_hour:
+                last_hour = now_hour
+                articles  = fetch_oracle_news(hours_back=2)
+
+                if not articles:
+                    logger.info("Oracle — pas de news pertinentes")
+                    await asyncio.sleep(60 * 60)
+                    continue
+
+                btc_df = fetch("BTC-USD", period="10d", interval="1h")
+                if btc_df is None or len(btc_df) < 50:
+                    await asyncio.sleep(60 * 60)
+                    continue
+
+                signal     = await oracle_ai_signal(articles, btc_df)
+                direction  = signal.get("direction")
+                confidence = int(signal.get("confidence", 0))
+                risk       = signal.get("risk", "MEDIUM")
+                risk_emoji = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(risk, "🟡")
+                dir_emoji  = "📈" if direction == "BUY" else "📉" if direction == "SELL" else "⚖️"
+                catalysts  = "\n".join([f"• {c}" for c in signal.get("catalysts", [])])
+
+                msg = (
+                    f"🔮 *POLARIS ORACLE — {now.strftime('%H:%M')}*\n\n"
+                    f"{dir_emoji} Direction : *{direction or 'NEUTRAL'}* | Confiance : `{confidence}%`\n"
+                    f"⏱ Timeframe : `{signal.get('timeframe', '?')}`\n"
+                    f"{risk_emoji} Risque : `{risk}`\n\n"
+                    f"*Catalyseurs :*\n{catalysts}\n\n"
+                    f"📌 {signal.get('summary', '')}\n"
+                    f"📰 `{len(articles)} articles analysés`"
+                )
+                if JOHN_ID:
+                    try:
+                        await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
+                    except Exception as e:
+                        logger.error(f"Oracle Telegram: {e}")
+
+                if direction in ("BUY", "SELL") and confidence >= 75:
+                    data    = load_data()
+                    btc_15m = fetch("BTC-USD", period="5d", interval="15m")
+                    if btc_15m is not None and len(btc_15m) >= 50:
+                        btc_15m = compute_indicators(btc_15m)
+                        price   = float(btc_15m["Close"].squeeze().iloc[-1])
+                        atr     = float(btc_15m["ATR"].iloc[-1])
+                        if not pd.isna(atr) and atr > 0:
+                            pos = open_trade(data, "BTC-USD", direction, price, atr, score=int(confidence / 10))
+                            if pos and JOHN_ID:
+                                try:
+                                    await app.bot.send_message(
+                                        JOHN_ID,
+                                        f"🔮 *Oracle → Trade BTC ouvert*\n"
+                                        f"Confiance `{confidence}%` ≥ 75% → position prise\n"
+                                        f"Prix : `{price:.2f}$` | *{direction}*\n"
+                                        f"SL : `{pos['sl']:.2f}$` | TP : `{pos['tp']:.2f}$`",
+                                        parse_mode="Markdown"
+                                    )
+                                except Exception:
+                                    pass
+
+        except Exception as e:
+            logger.error(f"Oracle loop: {e}")
+
+        await asyncio.sleep(60 * 60)
 
 
 # ── RAPPORTS ───────────────────────────────────────────────────────────────────
@@ -1032,6 +1251,7 @@ async def main():
     await asyncio.gather(
         trading_loop(app),
         scheduler(app),
+        oracle_loop(app),
     )
 
 if __name__ == "__main__":

@@ -6,3 +6,4 @@ matplotlib==3.9.0
 google-generativeai==0.7.2
 pytz==2024.1
 supabase
+feedparser==6.0.11
