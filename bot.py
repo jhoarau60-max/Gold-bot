@@ -898,6 +898,22 @@ async def oracle_loop(app: Application):
                     except Exception as e:
                         logger.error(f"Oracle Telegram: {e}")
 
+                if sb_client:
+                    try:
+                        sb_client.table("oracle_signals").insert({
+                            "direction":      direction or "NEUTRAL",
+                            "confidence":     confidence,
+                            "timeframe":      signal.get("timeframe"),
+                            "risk":           risk,
+                            "catalysts":      json.dumps(signal.get("catalysts", []), ensure_ascii=False),
+                            "summary":        signal.get("summary", ""),
+                            "articles_count": len(articles),
+                            "created_at":     now.isoformat(),
+                        }).execute()
+                        logger.info(f"Oracle signal écrit Supabase — {direction} {confidence}%")
+                    except Exception as e:
+                        logger.error(f"Oracle Supabase insert: {e}")
+
                 if direction in ("BUY", "SELL") and confidence >= 75:
                     data    = load_data()
                     btc_15m = fetch("BTC-USD", period="5d", interval="15m")
