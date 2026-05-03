@@ -939,7 +939,7 @@ async def oracle_loop(app: Application):
         except Exception as e:
             logger.error(f"Oracle loop: {e}")
 
-        await asyncio.sleep(60 * 60)
+        await asyncio.sleep(15 * 60)
 
 
 # ── RAPPORTS ───────────────────────────────────────────────────────────────────
