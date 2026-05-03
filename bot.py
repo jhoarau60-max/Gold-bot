@@ -56,6 +56,7 @@ CAPITAL_INITIAL = float(ENV.get("CAPITAL", "50000"))
 
 SUPABASE_URL     = ENV.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = ENV.get("SUPABASE_SERVICE_KEY", "")
+logger.info(f"Supabase URL présente: {bool(SUPABASE_URL)} | Service key présente: {bool(SUPABASE_SERVICE_KEY)}")
 sb_client: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     try:
@@ -63,6 +64,8 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
         logger.info("Supabase connecté")
     except Exception as e:
         logger.error(f"Supabase connexion échouée: {e}")
+else:
+    logger.warning("Supabase désactivé — variables manquantes")
 
 TICKER_TO_BOT = {
     "XAUUSD=X": "gold",
