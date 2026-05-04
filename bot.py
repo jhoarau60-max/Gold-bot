@@ -114,14 +114,27 @@ def get_instruments() -> dict:
 
 
 # ── FETCH DONNÉES ──────────────────────────────────────────────────────────────
+TICKER_FALLBACKS = {
+    "XAUUSD=X": ["GC=F", "XAUUSD=X"],
+    "XAGUSD=X": ["SI=F", "XAGUSD=X"],
+    "BTC-USD":  ["BTC-USD"],
+}
+
 def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame | None:
-    try:
-        df = yf.download(ticker, period=period, interval=interval,
-                         progress=False, auto_adjust=True)
-        return df if not df.empty else None
-    except Exception as e:
-        logger.error(f"Erreur fetch {ticker}: {e}")
-        return None
+    import time
+    tickers_to_try = TICKER_FALLBACKS.get(ticker, [ticker])
+    for t in tickers_to_try:
+        for attempt in range(3):
+            try:
+                df = yf.download(t, period=period, interval=interval,
+                                 progress=False, auto_adjust=True)
+                if not df.empty:
+                    return df
+            except Exception as e:
+                logger.error(f"Erreur fetch {t} (tentative {attempt+1}): {e}")
+            time.sleep(2 ** attempt)
+    logger.error(f"Fetch échoué pour {ticker} après tous les fallbacks")
+    return None
 
 
 # ── INDICATEURS TECHNIQUES (multi-stratégies) ──────────────────────────────────
