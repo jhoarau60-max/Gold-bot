@@ -88,10 +88,7 @@ WEEKEND_INSTRUMENTS = {
 }
 
 # ── DONNÉES PERSISTANTES ───────────────────────────────────────────────────────
-def load_data() -> dict:
-    if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE) as f:
-            return json.load(f)
+def _default_state() -> dict:
     return {
         "capital":        CAPITAL_INITIAL,
         "open_positions": [],
@@ -105,9 +102,78 @@ def load_data() -> dict:
         "loss_streak":    0,
     }
 
+def load_data_from_supabase() -> dict:
+    """Reconstruit l'état depuis Supabase après un restart Railway."""
+    base = _default_state()
+    if not sb_client:
+        return base
+    try:
+        # Capital + état journalier
+        s_res = sb_client.table("bot_state").select("*").eq("id", 1).execute()
+        if s_res.data:
+            s = s_res.data[0]
+            base["capital"]      = float(s.get("capital") or CAPITAL_INITIAL)
+            base["total_pnl"]    = float(s.get("total_pnl") or 0)
+            base["daily_pnl"]    = float(s.get("daily_pnl") or 0)
+            base["daily_trades"] = int(s.get("daily_trades") or 0)
+            base["win_streak"]   = int(s.get("win_streak") or 0)
+            base["loss_streak"]  = int(s.get("loss_streak") or 0)
+            base["last_reset"]   = str(s.get("last_reset") or base["last_reset"])[:10]
+
+        # Positions ouvertes (avec SL/TP pour gérer les sorties)
+        o_res = sb_client.table("trade_history").select("*").eq("status", "open").execute()
+        for row in (o_res.data or []):
+            if row.get("sl") and row.get("tp") and row.get("qty"):
+                base["open_positions"].append({
+                    "ticker":      row["symbol"],
+                    "direction":   row["direction"],
+                    "entry_price": float(row["price_entry"]),
+                    "sl":          float(row["sl"]),
+                    "tp":          float(row["tp"]),
+                    "qty":         float(row["qty"]),
+                    "score":       int(row.get("score") or 0),
+                    "entry_time":  str(row.get("opened_at") or ""),
+                    "pnl":         0.0,
+                    "supabase_id": row["id"],
+                })
+
+        logger.info(
+            f"State Supabase chargé — capital: {base['capital']:.2f} EUR, "
+            f"{len(base['open_positions'])} positions ouvertes récupérées"
+        )
+    except Exception as e:
+        logger.error(f"load_data_from_supabase: {e}")
+    return base
+
+def load_data() -> dict:
+    if os.path.exists(TRADES_FILE):
+        with open(TRADES_FILE) as f:
+            return json.load(f)
+    # trades.json absent (restart Railway) → reconstruire depuis Supabase
+    logger.warning("trades.json absent — reconstruction depuis Supabase")
+    data = load_data_from_supabase()
+    save_data(data)
+    return data
+
 def save_data(data: dict):
     with open(TRADES_FILE, "w") as f:
         json.dump(data, f, indent=2, default=str)
+    # Sync état capital vers Supabase (persistance cross-restart)
+    if sb_client:
+        try:
+            sb_client.table("bot_state").upsert({
+                "id":           1,
+                "capital":      round(data["capital"], 2),
+                "total_pnl":    round(data["total_pnl"], 2),
+                "daily_pnl":    round(data["daily_pnl"], 2),
+                "daily_trades": data["daily_trades"],
+                "win_streak":   data.get("win_streak", 0),
+                "loss_streak":  data.get("loss_streak", 0),
+                "last_reset":   data.get("last_reset"),
+                "updated_at":   datetime.now(TZ).isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.error(f"save_data Supabase sync: {e}")
 
 def get_instruments() -> dict:
     return WEEKEND_INSTRUMENTS if datetime.now(TZ).weekday() >= 5 else WEEKDAY_INSTRUMENTS
@@ -293,7 +359,8 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
 
     score_buy  = 0
     score_sell = 0
-    reasons    = []
+    reasons_buy  = []
+    reasons_sell = []
 
     c = float(last["Close"].squeeze() if hasattr(last["Close"], "squeeze") else last["Close"])
     ema9   = float(last["EMA9"])
@@ -306,97 +373,96 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
     macd_h = float(last["MACD_hist"])
     stk    = float(last["STOCH_K"])
     std    = float(last["STOCH_D"])
-    bb_up  = float(last["BB_upper"])
-    bb_low = float(last["BB_lower"])
     adx    = float(last["ADX"])
     wr     = float(last["WILLIAMS_R"])
 
-    prev_macd = float(prev["MACD"])
+    prev_macd   = float(prev["MACD"])
     prev_macd_s = float(prev["MACD_signal"])
-    prev_ema9 = float(prev["EMA9"])
-    prev_ema21 = float(prev["EMA21"])
+    prev_ema9   = float(prev["EMA9"])
+    prev_ema21  = float(prev["EMA21"])
 
     # 1. TENDANCE PRINCIPALE (EMA 50 & 200 — Paul Tudor Jones)
     if c > ema200 and ema50 > ema200:
         score_buy += 1
-        reasons.append("✅ Tendance long terme haussière (EMA200)")
+        reasons_buy.append("✅ Tendance long terme haussière (EMA200)")
     elif c < ema200 and ema50 < ema200:
         score_sell += 1
-        reasons.append("✅ Tendance long terme baissière (EMA200)")
+        reasons_sell.append("✅ Tendance long terme baissière (EMA200)")
 
     # 2. CROISEMENT EMA 9/21 (Elder Triple Screen — Screen 2)
     cross_up   = prev_ema9 <= prev_ema21 and ema9 > ema21
     cross_down = prev_ema9 >= prev_ema21 and ema9 < ema21
     if cross_up:
         score_buy += 2
-        reasons.append("✅ Croisement EMA 9 × EMA 21 haussier")
+        reasons_buy.append("✅ Croisement EMA 9 × EMA 21 haussier")
     elif cross_down:
         score_sell += 2
-        reasons.append("✅ Croisement EMA 9 × EMA 21 baissier")
+        reasons_sell.append("✅ Croisement EMA 9 × EMA 21 baissier")
     elif ema9 > ema21:
         score_buy += 1
-        reasons.append("✅ EMA 9 au-dessus EMA 21")
+        reasons_buy.append("✅ EMA 9 au-dessus EMA 21")
     else:
         score_sell += 1
-        reasons.append("✅ EMA 9 en-dessous EMA 21")
+        reasons_sell.append("✅ EMA 9 en-dessous EMA 21")
 
     # 3. MACD (momentum confirme la direction)
     macd_cross_up   = prev_macd <= prev_macd_s and macd > macd_s
     macd_cross_down = prev_macd >= prev_macd_s and macd < macd_s
     if macd_cross_up or (macd > macd_s and macd_h > 0):
         score_buy += 1
-        reasons.append("✅ MACD haussier")
+        reasons_buy.append("✅ MACD haussier")
     elif macd_cross_down or (macd < macd_s and macd_h < 0):
         score_sell += 1
-        reasons.append("✅ MACD baissier")
+        reasons_sell.append("✅ MACD baissier")
 
     # 4. RSI (éviter surachat/survente — Wilder)
     if 40 <= rsi <= 65:
         score_buy += 1
-        reasons.append(f"✅ RSI favorable achat ({rsi:.1f})")
+        reasons_buy.append(f"✅ RSI favorable achat ({rsi:.1f})")
     elif 35 <= rsi <= 60:
         score_sell += 1
-        reasons.append(f"✅ RSI favorable vente ({rsi:.1f})")
+        reasons_sell.append(f"✅ RSI favorable vente ({rsi:.1f})")
     elif rsi > 75:
         score_sell += 1
-        reasons.append(f"⚠️ RSI en surachat ({rsi:.1f})")
+        reasons_sell.append(f"⚠️ RSI en surachat ({rsi:.1f})")
     elif rsi < 25:
         score_buy += 1
-        reasons.append(f"⚠️ RSI en survente ({rsi:.1f})")
+        reasons_buy.append(f"⚠️ RSI en survente ({rsi:.1f})")
 
     # 5. STOCHASTIQUE (Lane — entrée précise)
     if stk > std and stk < 80:
         score_buy += 1
-        reasons.append(f"✅ Stochastique haussier ({stk:.1f})")
+        reasons_buy.append(f"✅ Stochastique haussier ({stk:.1f})")
     elif stk < std and stk > 20:
         score_sell += 1
-        reasons.append(f"✅ Stochastique baissier ({stk:.1f})")
+        reasons_sell.append(f"✅ Stochastique baissier ({stk:.1f})")
 
-    # 6. ADX — force de la tendance (Richard Dennis : trade uniquement si tendance forte)
+    # 6. ADX — force de la tendance (Richard Dennis)
     if adx > 25:
-        reasons.append(f"✅ ADX fort ({adx:.1f}) — tendance confirmée")
         if ema9 > ema21:
             score_buy += 1
+            reasons_buy.append(f"✅ ADX fort ({adx:.1f}) — tendance haussière confirmée")
         else:
             score_sell += 1
+            reasons_sell.append(f"✅ ADX fort ({adx:.1f}) — tendance baissière confirmée")
     else:
-        reasons.append(f"⚠️ ADX faible ({adx:.1f}) — marché en consolidation")
+        reasons_buy.append(f"⚠️ ADX faible ({adx:.1f}) — marché en consolidation")
+        reasons_sell.append(f"⚠️ ADX faible ({adx:.1f}) — marché en consolidation")
 
     # 7. WILLIAMS %R (Larry Williams — timing d'entrée)
     if -80 <= wr <= -20 and wr > float(prev["WILLIAMS_R"]):
         score_buy += 1
-        reasons.append(f"✅ Williams %R en zone d'achat ({wr:.1f})")
+        reasons_buy.append(f"✅ Williams %R en zone d'achat ({wr:.1f})")
     elif -80 <= wr <= -20 and wr < float(prev["WILLIAMS_R"]):
         score_sell += 1
-        reasons.append(f"✅ Williams %R en zone de vente ({wr:.1f})")
+        reasons_sell.append(f"✅ Williams %R en zone de vente ({wr:.1f})")
 
-    # Déterminer direction
     threshold = 4
     if score_buy >= threshold and score_buy > score_sell:
-        return "BUY", score_buy, reasons
+        return "BUY", score_buy, reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
-        return "SELL", score_sell, reasons
-    return None, max(score_buy, score_sell), reasons
+        return "SELL", score_sell, reasons_sell
+    return None, max(score_buy, score_sell), []
 
 
 # ── MISE À JOUR PROFILES INVESTISSEURS ────────────────────────────────────────
@@ -476,6 +542,10 @@ def open_trade(data: dict, ticker: str, direction: str,
                 "symbol":      ticker,
                 "direction":   direction,
                 "price_entry": round(price, 5),
+                "sl":          round(sl, 5),
+                "tp":          round(tp, 5),
+                "qty":         round(qty, 6),
+                "score":       score,
                 "status":      "open",
                 "opened_at":   datetime.now(TZ).isoformat(),
             }).execute()
