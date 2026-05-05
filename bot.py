@@ -191,39 +191,35 @@ def _is_rate_limit(e: Exception) -> bool:
     return "too many requests" in s or "rate limit" in s or "ratelimit" in s
 
 def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame | None:
-    import time
     tickers_to_try = TICKER_FALLBACKS.get(ticker, [ticker])
     for t in tickers_to_try:
-        for attempt in range(3):
-            try:
-                df = yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
-                if df is not None and not df.empty and len(df) >= 10:
-                    logger.info(f"Fetch OK: {t} — {len(df)} bougies")
+        # Ticker.history — tentative unique, pas de sleep (appelé depuis async)
+        try:
+            df = yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
+            if df is not None and not df.empty and len(df) >= 10:
+                logger.info(f"Fetch OK: {t} — {len(df)} bougies")
+                return df
+        except Exception as e:
+            if _is_rate_limit(e):
+                logger.warning(f"Rate limit {t} — skip")
+                return None
+            logger.error(f"Erreur fetch {t}: {e}")
+        # Fallback: yf.download — tentative unique
+        try:
+            df = yf.download(t, period=period, interval=interval,
+                             progress=False, auto_adjust=True)
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                if len(df) >= 10:
+                    logger.info(f"Fetch OK (download): {t} — {len(df)} bougies")
                     return df
-            except Exception as e:
-                if _is_rate_limit(e):
-                    logger.warning(f"Rate limit {t} — skip, réessai au prochain cycle")
-                    return None  # ne pas bloquer l'event loop
-                logger.error(f"Erreur fetch {t} (tentative {attempt+1}): {e}")
-                time.sleep(min(2 ** attempt, 5))
-        # Fallback: yf.download
-        for attempt in range(2):
-            try:
-                df = yf.download(t, period=period, interval=interval,
-                                 progress=False, auto_adjust=True)
-                if df is not None and not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    if len(df) >= 10:
-                        logger.info(f"Fetch OK (download): {t} — {len(df)} bougies")
-                        return df
-            except Exception as e:
-                if _is_rate_limit(e):
-                    logger.warning(f"Rate limit download {t} — skip")
-                    return None
-                logger.error(f"Erreur download {t} (tentative {attempt+1}): {e}")
-                time.sleep(min(2 ** attempt, 5))
-    logger.error(f"Fetch échoué pour {ticker} après tous les fallbacks")
+        except Exception as e:
+            if _is_rate_limit(e):
+                logger.warning(f"Rate limit download {t} — skip")
+                return None
+            logger.error(f"Erreur download {t}: {e}")
+    logger.error(f"Fetch échoué pour {ticker}")
     return None
 
 
