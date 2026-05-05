@@ -190,6 +190,10 @@ def _is_rate_limit(e: Exception) -> bool:
     s = str(e).lower()
     return "too many requests" in s or "rate limit" in s or "ratelimit" in s
 
+async def fetch_async(ticker: str, period: str = "5d", interval: str = "15m"):
+    """Wrapper non-bloquant — exécute fetch() dans thread pool."""
+    return await asyncio.to_thread(fetch, ticker, period, interval)
+
 def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame | None:
     tickers_to_try = TICKER_FALLBACKS.get(ticker, [ticker])
     for t in tickers_to_try:
@@ -617,8 +621,8 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
 
 
 # ── GRAPHIQUES PROFESSIONNELS ──────────────────────────────────────────────────
-def chart_instrument(ticker: str, name: str, data: dict) -> io.BytesIO | None:
-    df = fetch(ticker, period="2d", interval="15m")
+async def chart_instrument(ticker: str, name: str, data: dict) -> io.BytesIO | None:
+    df = await fetch_async(ticker, period="2d", interval="15m")
     if df is None or len(df) < 30:
         return None
     df = compute_indicators(df)
@@ -785,7 +789,7 @@ async def ai_prediction(instruments: dict, data: dict) -> str:
 
         market_lines = ""
         for ticker, info in instruments.items():
-            df = fetch(ticker, period="10d", interval="1h")
+            df = await fetch_async(ticker, period="10d", interval="1h")
             if df is not None and not df.empty:
                 df = compute_indicators(df)
                 c    = df["Close"].squeeze()
@@ -973,7 +977,7 @@ async def oracle_loop(app: Application):
                     await asyncio.sleep(60 * 60)
                     continue
 
-                btc_df = fetch("BTC-USD", period="10d", interval="1h")
+                btc_df = await fetch_async("BTC-USD", period="10d", interval="1h")
                 if btc_df is None or len(btc_df) < 50:
                     await asyncio.sleep(60 * 60)
                     continue
@@ -1019,7 +1023,7 @@ async def oracle_loop(app: Application):
 
                 if direction in ("BUY", "SELL") and confidence >= 75:
                     data    = load_data()
-                    btc_15m = fetch("BTC-USD", period="5d", interval="15m")
+                    btc_15m = await fetch_async("BTC-USD", period="5d", interval="15m")
                     if btc_15m is not None and len(btc_15m) >= 50:
                         btc_15m = compute_indicators(btc_15m)
                         price   = float(btc_15m["Close"].squeeze().iloc[-1])
@@ -1060,7 +1064,7 @@ async def morning_report(app: Application):
 
     prices_txt = ""
     for ticker, info in instruments.items():
-        df = fetch(ticker)
+        df = await fetch_async(ticker)
         if df is not None and not df.empty:
             df2 = compute_indicators(df)
             price = float(df2["Close"].squeeze().iloc[-1])
@@ -1135,7 +1139,7 @@ async def evening_report(app: Application):
         logger.error(f"Erreur envoi rapport soir: {e}")
 
     for ticker, info in instruments.items():
-        buf = chart_instrument(ticker, info["name"], data)
+        buf = await chart_instrument(ticker, info["name"], data)
         if buf:
             try:
                 await app.bot.send_photo(JOHN_ID, buf,
@@ -1163,7 +1167,7 @@ async def trading_loop(app: Application):
             instruments = get_instruments()
 
             for ticker, info in instruments.items():
-                df = fetch(ticker)
+                df = await fetch_async(ticker)
                 if df is None or len(df) < 50:
                     continue
 
@@ -1270,7 +1274,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "📊 *Positions ouvertes :*\n\n"
     for pos in data["open_positions"]:
         info = all_inst.get(pos["ticker"], {"name": pos["ticker"], "emoji": "📊"})
-        df   = fetch(pos["ticker"])
+        df   = await fetch_async(pos["ticker"])
         cur  = float(df["Close"].squeeze().iloc[-1]) if df is not None and not df.empty else pos["entry_price"]
         pnl  = (cur - pos["entry_price"]) * pos["qty"] if pos["direction"] == "BUY" else (pos["entry_price"] - cur) * pos["qty"]
         em   = "✅" if pnl > 0 else "🔴"
@@ -1310,7 +1314,7 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     instruments = get_instruments()
     msg = "🔍 *Analyse du marché — GOLD BOT*\n\n"
     for ticker, info in instruments.items():
-        df = fetch(ticker)
+        df = await fetch_async(ticker)
         if df is None or len(df) < 50:
             continue
         df    = compute_indicators(df)
