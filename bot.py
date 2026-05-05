@@ -126,12 +126,28 @@ def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFram
     for t in tickers_to_try:
         for attempt in range(3):
             try:
-                df = yf.download(t, period=period, interval=interval,
-                                 progress=False, auto_adjust=True)
-                if not df.empty:
+                # Ticker.history() more reliable on cloud (no MultiIndex, no rate-limit issues)
+                df = yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
+                if df is not None and not df.empty and len(df) >= 10:
+                    logger.info(f"Fetch OK: {t} — {len(df)} bougies via Ticker.history()")
                     return df
             except Exception as e:
                 logger.error(f"Erreur fetch {t} (tentative {attempt+1}): {e}")
+            time.sleep(2 ** attempt)
+        # Fallback: yf.download si Ticker.history échoue
+        for attempt in range(2):
+            try:
+                df = yf.download(t, period=period, interval=interval,
+                                 progress=False, auto_adjust=True)
+                if df is not None and not df.empty:
+                    # Aplatir MultiIndex si présent
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    if len(df) >= 10:
+                        logger.info(f"Fetch OK (fallback download): {t} — {len(df)} bougies")
+                        return df
+            except Exception as e:
+                logger.error(f"Erreur download {t} (tentative {attempt+1}): {e}")
             time.sleep(2 ** attempt)
     logger.error(f"Fetch échoué pour {ticker} après tous les fallbacks")
     return None
@@ -978,6 +994,9 @@ async def morning_report(app: Application):
             adx   = float(df2["ADX"].iloc[-1])
             prices_txt += (f"{info['emoji']} *{info['name']}* : `{price:.4f}` "
                            f"| RSI: `{rsi:.1f}` | ADX: `{adx:.1f}`\n")
+        else:
+            prices_txt += f"{info['emoji']} *{info['name']}* : ⚠️ données indisponibles\n"
+            logger.error(f"morning_report: fetch échoué pour {ticker}")
 
     ia_txt = await ai_prediction(instruments, data)
     mode   = "Week-end — Mode CRYPTO 🪙" if now.weekday() >= 5 else "Semaine — Mode MÉTAUX 🥇🥈"
