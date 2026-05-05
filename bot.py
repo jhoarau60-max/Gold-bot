@@ -69,6 +69,19 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
 else:
     logger.warning("Supabase désactivé — variables manquantes")
 
+# Client séparé pour wiki_knowledge (projet Sofia/Elise — email différent)
+WIKI_SUPABASE_URL = ENV.get("WIKI_SUPABASE_URL", "")
+WIKI_SUPABASE_KEY = ENV.get("WIKI_SUPABASE_KEY", "")
+wiki_sb_client: Client | None = None
+if WIKI_SUPABASE_URL and WIKI_SUPABASE_KEY:
+    try:
+        wiki_sb_client = create_client(WIKI_SUPABASE_URL, WIKI_SUPABASE_KEY)
+        logger.info("Wiki Supabase connecté")
+    except Exception as e:
+        logger.error(f"Wiki Supabase connexion échouée: {e}")
+else:
+    logger.warning("Wiki Supabase désactivé — WIKI_SUPABASE_URL / WIKI_SUPABASE_KEY manquants")
+
 TICKER_TO_BOT = {
     "XAUUSD=X": "gold",
     "XAGUSD=X": "silver",
@@ -620,6 +633,100 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
     return closed
 
 
+# ── LIGNES DE TENDANCE AUTOMATIQUES ───────────────────────────────────────────
+
+def detect_pivots(df: pd.DataFrame, n: int = 5) -> tuple[list, list]:
+    """Détecte pivots hauts et bas (n bougies de chaque côté)."""
+    h = df["High"].squeeze().values
+    l = df["Low"].squeeze().values
+    idx = df.index
+
+    pivot_highs, pivot_lows = [], []
+    for i in range(n, len(df) - n):
+        if h[i] == max(h[i - n:i + n + 1]):
+            pivot_highs.append((idx[i], h[i]))
+        if l[i] == min(l[i - n:i + n + 1]):
+            pivot_lows.append((idx[i], l[i]))
+
+    return pivot_highs, pivot_lows
+
+
+def draw_trendlines(ax, df: pd.DataFrame,
+                    pivot_highs: list, pivot_lows: list) -> str | None:
+    """
+    Trace lignes de tendance + détecte pattern (triangle/canal/wedge).
+    Retourne nom du pattern ou None.
+    """
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return None
+
+    x_all = df.index
+    # Convertir timestamps en float pour la pente
+    def ts_float(ts):
+        return ts.timestamp() if hasattr(ts, "timestamp") else float(ts.value)
+
+    # Derniers 2 pivots hauts
+    ph1, ph2 = pivot_highs[-2], pivot_highs[-1]
+    x1h, y1h = ts_float(ph1[0]), ph1[1]
+    x2h, y2h = ts_float(ph2[0]), ph2[1]
+    slope_h  = (y2h - y1h) / (x2h - x1h) if x2h != x1h else 0
+
+    # Derniers 2 pivots bas
+    pl1, pl2 = pivot_lows[-2], pivot_lows[-1]
+    x1l, y1l = ts_float(pl1[0]), pl1[1]
+    x2l, y2l = ts_float(pl2[0]), pl2[1]
+    slope_l  = (y2l - y1l) / (x2l - x1l) if x2l != x1l else 0
+
+    # Projection sur toute la plage x
+    x_start = ts_float(x_all[0])
+    x_end   = ts_float(x_all[-1])
+
+    def project(x_ref, y_ref, slope, x):
+        return y_ref + slope * (x - x_ref)
+
+    y_h_start = project(x2h, y2h, slope_h, x_start)
+    y_h_end   = project(x2h, y2h, slope_h, x_end)
+    y_l_start = project(x2l, y2l, slope_l, x_start)
+    y_l_end   = project(x2l, y2l, slope_l, x_end)
+
+    # Tracer résistance (rouge) et support (vert)
+    ax.plot([x_all[0], x_all[-1]], [y_h_start, y_h_end],
+            color="#ff4500", lw=1.5, ls="--", alpha=0.85, label="Résistance")
+    ax.plot([x_all[0], x_all[-1]], [y_l_start, y_l_end],
+            color="#00ff7f", lw=1.5, ls="--", alpha=0.85, label="Support")
+
+    # Marqueurs pivots
+    for ts, price in pivot_highs[-3:]:
+        ax.scatter(ts, price, color="#ff4500", marker="v", s=60, zorder=6, alpha=0.7)
+    for ts, price in pivot_lows[-3:]:
+        ax.scatter(ts, price, color="#00ff7f", marker="^", s=60, zorder=6, alpha=0.7)
+
+    # Remplissage canal
+    ax.fill_between(
+        [x_all[0], x_all[-1]],
+        [y_h_start, y_h_end],
+        [y_l_start, y_l_end],
+        alpha=0.05, color="#ffffff"
+    )
+
+    # Détection pattern
+    eps = abs(y2h - y1h) * 0.001  # tolérance pente nulle
+    if slope_h < -eps and slope_l > eps:
+        return "Triangle Symétrique ▲"
+    elif slope_h < -eps and abs(slope_l) <= eps:
+        return "Triangle Descendant ▽"
+    elif abs(slope_h) <= eps and slope_l > eps:
+        return "Triangle Ascendant △"
+    elif slope_h < -eps and slope_l < -eps:
+        return "Wedge Baissier ↘"
+    elif slope_h > eps and slope_l > eps:
+        return "Wedge Haussier ↗"
+    elif abs(slope_h - slope_l) < eps * 5:
+        dir_txt = "Haussier" if slope_h > 0 else "Baissier" if slope_h < 0 else "Neutre"
+        return f"Canal {dir_txt} ↔"
+    return None
+
+
 # ── GRAPHIQUES PROFESSIONNELS ──────────────────────────────────────────────────
 async def chart_instrument(ticker: str, name: str, data: dict) -> io.BytesIO | None:
     df = await fetch_async(ticker, period="2d", interval="15m")
@@ -660,6 +767,10 @@ async def chart_instrument(ticker: str, name: str, data: dict) -> io.BytesIO | N
     for fk, fc in zip(fib_keys, fib_colors):
         ax1.axhline(fibs[fk], color=fc, lw=0.7, ls=":", alpha=0.6)
 
+    # Lignes de tendance automatiques
+    pivot_highs, pivot_lows = detect_pivots(df, n=5)
+    pattern_label = draw_trendlines(ax1, df, pivot_highs, pivot_lows)
+
     # Points d'entrée/sortie
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     for trade in data.get("closed_trades", []):
@@ -680,7 +791,8 @@ async def chart_instrument(ticker: str, name: str, data: dict) -> io.BytesIO | N
         except Exception:
             pass
 
-    ax1.set_title(f"GOLD BOT — {name} — {datetime.now(TZ).strftime('%d/%m/%Y')}",
+    pat_str = f" — {pattern_label}" if pattern_label else ""
+    ax1.set_title(f"GOLD BOT — {name} — {datetime.now(TZ).strftime('%d/%m/%Y')}{pat_str}",
                   color="white", fontsize=13, fontweight="bold", pad=8)
     ax1.legend(facecolor="#0d1f3c", labelcolor="white", fontsize=8, loc="upper left")
     ax1.yaxis.set_tick_params(labelcolor="white")
@@ -1156,6 +1268,205 @@ async def evening_report(app: Application):
         except Exception:
             pass
     logger.info("Rapport soir envoyé")
+    await generate_daily_journal(app, data)
+
+
+# ── AUTO-APPRENTISSAGE — JOURNAL + POST-MORTEM + AUDIT ─────────────────────────
+
+def push_wiki_knowledge(slug: str, title: str, type_: str, summary: str, full_content: str):
+    if not wiki_sb_client:
+        logger.warning("Wiki push ignoré — WIKI_SUPABASE_URL/KEY non configurés")
+        return
+    try:
+        wiki_sb_client.table("wiki_knowledge").upsert({
+            "slug":         slug,
+            "title":        title,
+            "type":         type_,
+            "summary":      summary[:1000],
+            "full_content": full_content[:5000],
+            "created_at":   datetime.now(TZ).isoformat(),
+        }, on_conflict="slug").execute()
+        logger.info(f"Wiki push OK — {slug}")
+    except Exception as e:
+        logger.error(f"Wiki push failed: {e}")
+
+
+async def post_mortem_analysis(app: Application, pos: dict):
+    """Analyse Gemini sur trade perdant → wiki_knowledge."""
+    if not GEMINI_API_KEY:
+        return
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        pnl = pos.get("pnl", 0)
+
+        prompt = f"""Tu es un coach de trading expert. Analyse ce trade perdant en 3 points concis (Markdown).
+
+TRADE :
+- Instrument : {pos.get('ticker')} | Direction : {pos.get('direction')}
+- Entrée : {pos.get('entry_price')} → Sortie : {pos.get('exit_price', '?')}
+- SL : {pos.get('sl')} | TP : {pos.get('tp')}
+- P&L : {pnl:+.2f} EUR | Score signal : {pos.get('score', '?')}/7
+- Raison sortie : {pos.get('exit_reason', 'Stop Loss')}
+
+1. **Erreur principale** : Qu'est-ce qui a mal tourné ?
+2. **Signal d'alerte manqué** : Quel indicateur aurait dû alerter ?
+3. **Leçon** : Que faire différemment ?"""
+
+        resp   = model.generate_content(prompt)
+        lesson = resp.text.strip()
+        today  = datetime.now(TZ).strftime("%Y-%m-%d")
+        t_slug = pos.get('ticker','').replace('=','').replace('-','').lower()
+        h_slug = (pos.get('entry_time','')[11:16] or "0000").replace(':','')
+        slug   = f"postmortem-{t_slug}-{today}-{h_slug}"
+
+        full = f"""---
+title: "Post-mortem {pos.get('ticker')} {today}"
+type: postmortem
+created: {today}
+---
+
+## Trade
+- {pos.get('ticker')} {pos.get('direction')} | Score {pos.get('score','?')}/7
+- Entrée {pos.get('entry_price')} → Sortie {pos.get('exit_price','?')} | P&L {pnl:+.2f} EUR
+
+## Analyse
+{lesson}
+"""
+        push_wiki_knowledge(slug, f"Post-mortem {pos.get('ticker')} {today}", "postmortem", lesson[:500], full)
+
+        if JOHN_ID:
+            try:
+                await app.bot.send_message(
+                    JOHN_ID,
+                    f"🧠 *Post-mortem — {pos.get('ticker')}*\n\nP&L : `{pnl:+.2f} EUR`\n\n{lesson[:600]}",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Post-mortem: {e}")
+
+
+async def generate_daily_journal(app: Application, data: dict):
+    """Journal journalier Markdown → wiki_knowledge."""
+    now   = datetime.now(TZ)
+    today = now.strftime("%Y-%m-%d")
+
+    today_trades = [t for t in data.get("closed_trades", []) if t.get("entry_time","")[:10] == today]
+    wins   = [t for t in today_trades if t.get("pnl", 0) > 0]
+    losses = [t for t in today_trades if t.get("pnl", 0) <= 0]
+    wr     = (len(wins) / len(today_trades) * 100) if today_trades else 0
+    pct    = (data["capital"] - CAPITAL_INITIAL) / CAPITAL_INITIAL * 100
+
+    trades_md = "\n".join([
+        f"- {'✅' if t.get('pnl',0)>0 else '❌'} {t.get('ticker')} {t.get('direction')} "
+        f"Score {t.get('score','?')}/7 | P&L {t.get('pnl',0):+.2f} EUR | {t.get('exit_reason','?')}"
+        for t in today_trades
+    ]) or "- Aucun trade clôturé aujourd'hui."
+
+    full = f"""---
+title: "Journal Gold Bot {today}"
+type: journal
+created: {today}
+---
+
+## Summary
+Journée {today} : {len(today_trades)} trades, taux réussite {wr:.1f}%, P&L {data['daily_pnl']:+.2f} EUR.
+
+## Résultats
+- Trades : {len(today_trades)} | Gagnants : {len(wins)} | Perdants : {len(losses)}
+- Taux de réussite : {wr:.1f}%
+- P&L du jour : {data['daily_pnl']:+.2f} EUR
+- Capital : {data['capital']:.2f} EUR ({pct:+.2f}% total)
+- Série victoires : {data.get('win_streak',0)} | Série défaites : {data.get('loss_streak',0)}
+
+## Trades
+{trades_md}
+"""
+    slug    = f"journal-goldbot-{today}"
+    summary = f"Gold Bot {today} : {len(today_trades)} trades, {wr:.1f}% WR, P&L {data['daily_pnl']:+.2f} EUR"
+    push_wiki_knowledge(slug, f"Journal Gold Bot {today}", "journal", summary, full)
+    logger.info(f"Journal journalier poussé: {slug}")
+
+
+async def weekly_audit(app: Application, data: dict):
+    """Audit hebdomadaire dimanche — Gemini analyse + wiki push."""
+    now     = datetime.now(TZ)
+    today   = now.strftime("%Y-%m-%d")
+    cutoff  = (now - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+
+    week_trades = [t for t in data.get("closed_trades", []) if t.get("entry_time","")[:10] >= cutoff]
+    wins      = [t for t in week_trades if t.get("pnl", 0) > 0]
+    losses    = [t for t in week_trades if t.get("pnl", 0) <= 0]
+    total_pnl = sum(t.get("pnl", 0) for t in week_trades)
+    wr        = (len(wins) / len(week_trades) * 100) if week_trades else 0
+    pct       = (data["capital"] - CAPITAL_INITIAL) / CAPITAL_INITIAL * 100
+    best      = max(week_trades, key=lambda x: x.get("pnl", 0), default=None)
+    worst     = min(week_trades, key=lambda x: x.get("pnl", 0), default=None)
+
+    analysis = "Analyse indisponible."
+    if GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            trades_summary = "\n".join([
+                f"- {t.get('ticker')} {t.get('direction')} Score:{t.get('score','?')}/7 P&L:{t.get('pnl',0):+.2f}€ ({t.get('exit_reason','?')})"
+                for t in week_trades[-20:]
+            ]) or "Aucun trade."
+
+            prompt = f"""Analyse la semaine de trading (Markdown, 4 points concis).
+
+STATS : {len(week_trades)} trades | {wr:.1f}% WR | P&L semaine {total_pnl:+.2f} EUR | Capital {data['capital']:.2f} EUR ({pct:+.2f}%)
+Meilleur : {f"{best['ticker']} {best['direction']} +{best['pnl']:.2f}€" if best else "N/A"}
+Pire : {f"{worst['ticker']} {worst['direction']} {worst['pnl']:+.2f}€" if worst else "N/A"}
+
+TRADES :
+{trades_summary}
+
+1. **Performance globale** : Bonne/mauvaise semaine ?
+2. **Patterns d'erreurs** : Quelles erreurs reviennent ?
+3. **Forces identifiées** : Ce qui fonctionne
+4. **Actions semaine prochaine** : 2-3 ajustements concrets"""
+
+            resp     = model.generate_content(prompt)
+            analysis = resp.text.strip()
+        except Exception as e:
+            analysis = f"Analyse indisponible: {e}"
+
+    full = f"""---
+title: "Audit Hebdomadaire Gold Bot {today}"
+type: audit
+created: {today}
+---
+
+## Summary
+Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {total_pnl:+.2f} EUR.
+
+## Statistiques
+- Trades : {len(week_trades)} | Gagnants : {len(wins)} | Perdants : {len(losses)}
+- Taux de réussite : {wr:.1f}% | P&L semaine : {total_pnl:+.2f} EUR
+- Capital : {data['capital']:.2f} EUR ({pct:+.2f}% total)
+
+## Analyse Gemini
+{analysis}
+"""
+    slug    = f"audit-goldbot-{today}"
+    summary = f"Audit semaine {cutoff}/{today}: {len(week_trades)} trades, {wr:.1f}% WR, {total_pnl:+.2f} EUR"
+    push_wiki_knowledge(slug, f"Audit Gold Bot semaine {today}", "audit", summary, full)
+
+    if JOHN_ID:
+        try:
+            await app.bot.send_message(
+                JOHN_ID,
+                f"📋 *Audit Hebdomadaire — Gold Bot*\n📅 {cutoff} → {today}\n\n"
+                f"📊 {len(week_trades)} trades | {wr:.1f}% WR | `{total_pnl:+.2f} EUR`\n\n"
+                f"{analysis[:700]}\n\n💾 _Sauvegardé dans le wiki_",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+    logger.info(f"Audit hebdomadaire envoyé: {slug}")
 
 
 # ── BOUCLE DE TRADING ──────────────────────────────────────────────────────────
@@ -1195,6 +1506,8 @@ async def trading_loop(app: Application):
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                     except Exception:
                         pass
+                    if pnl_e < 0:
+                        asyncio.create_task(post_mortem_analysis(app, pos))
 
                 # Pattern chandeliers
                 pattern = detect_candlestick_pattern(df)
@@ -1233,6 +1546,7 @@ async def trading_loop(app: Application):
 async def scheduler(app: Application):
     last_morning = ""
     last_evening = ""
+    last_audit   = ""
     while True:
         now   = datetime.now(TZ)
         today = now.strftime("%Y-%m-%d")
@@ -1244,9 +1558,102 @@ async def scheduler(app: Application):
 
         if h == 22 and m < 15 and last_evening != today:
             await evening_report(app)
+            await _push_gold_wiki()
             last_evening = today
 
+        if h == 8 and m < 15 and now.weekday() == 6 and last_audit != today:
+            data = load_data()
+            await weekly_audit(app, data)
+            last_audit = today
+
         await asyncio.sleep(60)
+
+
+# ── WIKI MANUEL — buffer + push 22h ───────────────────────────────────────────
+gold_wiki_buffer: list[dict] = []
+
+async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != JOHN_ID:
+        return
+    now     = datetime.now(TZ).strftime("%H:%M")
+    content = ""
+    photo_bytes = None
+
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        file  = await context.bot.get_file(photo.file_id)
+        photo_bytes = bytes(await file.download_as_bytearray())
+        content = update.message.caption or "Image"
+    elif update.message.video or update.message.video_note:
+        await update.message.reply_text("⏳ Analyse vidéo en cours...")
+        vid   = update.message.video or update.message.video_note
+        file  = await context.bot.get_file(vid.file_id)
+        vbytes = bytes(await file.download_as_bytearray())
+        caption = update.message.caption or "Vidéo"
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            import google.generativeai as _g
+            resp  = model.generate_content([
+                {"mime_type": "video/mp4", "data": vbytes},
+                "Transcris et résume cette vidéo en français."
+            ])
+            content = f"[VIDÉO] {caption}\n{resp.text.strip()}"
+        except Exception as e:
+            content = f"[VIDÉO] {caption} (analyse échouée: {e})"
+    elif context.args:
+        content = " ".join(context.args)
+    elif update.message.reply_to_message:
+        content = update.message.reply_to_message.text or ""
+    else:
+        await update.message.reply_text("Usage: `/wiki <texte>` ou envoie une image/vidéo avec `/wiki` en légende.", parse_mode="Markdown")
+        return
+
+    gold_wiki_buffer.append({"content": content, "time": now, "photo_bytes": photo_bytes})
+    count = len(gold_wiki_buffer)
+    await update.message.reply_text(f"✅ Noté ({count} élément{'s' if count > 1 else ''} en attente — push à 22h)")
+
+
+async def cmd_wikisend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != JOHN_ID:
+        return
+    await update.message.reply_text("⏳ Push wiki Gold Bot en cours...")
+    await _push_gold_wiki()
+
+
+async def _push_gold_wiki():
+    if not gold_wiki_buffer:
+        return
+    if not GEMINI_API_KEY:
+        return
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        items_text = "\n".join([f"[{i+1}] ({it['time']}) {it['content']}"
+                                 for i, it in enumerate(gold_wiki_buffer)])
+        prompt = f"""Compile ces notes en une page wiki Markdown (format veille IA, date {today}).
+Frontmatter obligatoire :
+---
+title: "Notes Gold Bot {today}"
+type: source
+created: {today}
+---
+## Summary
+## Key Facts
+## Concepts Mentioned
+
+NOTES :
+{items_text}"""
+        resp = model.generate_content(prompt)
+        md   = resp.text.strip()
+        slug = f"notes-goldbot-{today}"
+        push_wiki_knowledge(slug, f"Notes Gold Bot {today}", "source",
+                            md[:500], md[:5000])
+        gold_wiki_buffer.clear()
+        logger.info(f"Gold wiki push OK: {slug}")
+    except Exception as e:
+        logger.error(f"Gold wiki push: {e}")
 
 
 # ── COMMANDES TELEGRAM ─────────────────────────────────────────────────────────
@@ -1352,7 +1759,9 @@ async def main():
     app.add_handler(CommandHandler("rapport", cmd_rapport))
     app.add_handler(CommandHandler("capital", cmd_capital))
     app.add_handler(CommandHandler("signal",  cmd_signal))
-    app.add_handler(CommandHandler("myid",    cmd_myid))
+    app.add_handler(CommandHandler("myid",      cmd_myid))
+    app.add_handler(CommandHandler("wiki",      cmd_wiki))
+    app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
 
     await app.initialize()
     await app.start()
