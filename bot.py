@@ -192,29 +192,37 @@ def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFram
     for t in tickers_to_try:
         for attempt in range(3):
             try:
-                # Ticker.history() more reliable on cloud (no MultiIndex, no rate-limit issues)
                 df = yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
                 if df is not None and not df.empty and len(df) >= 10:
-                    logger.info(f"Fetch OK: {t} — {len(df)} bougies via Ticker.history()")
+                    logger.info(f"Fetch OK: {t} — {len(df)} bougies")
                     return df
             except Exception as e:
-                logger.error(f"Erreur fetch {t} (tentative {attempt+1}): {e}")
-            time.sleep(2 ** attempt)
-        # Fallback: yf.download si Ticker.history échoue
+                err = str(e)
+                if "Too Many Requests" in err or "Rate limit" in err or "rate limit" in err:
+                    logger.warning(f"Rate limit yfinance {t} — attente 65s")
+                    time.sleep(65)
+                else:
+                    logger.error(f"Erreur fetch {t} (tentative {attempt+1}): {e}")
+                    time.sleep(2 ** attempt)
+        # Fallback: yf.download
         for attempt in range(2):
             try:
                 df = yf.download(t, period=period, interval=interval,
                                  progress=False, auto_adjust=True)
                 if df is not None and not df.empty:
-                    # Aplatir MultiIndex si présent
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = df.columns.get_level_values(0)
                     if len(df) >= 10:
-                        logger.info(f"Fetch OK (fallback download): {t} — {len(df)} bougies")
+                        logger.info(f"Fetch OK (download fallback): {t} — {len(df)} bougies")
                         return df
             except Exception as e:
-                logger.error(f"Erreur download {t} (tentative {attempt+1}): {e}")
-            time.sleep(2 ** attempt)
+                err = str(e)
+                if "Too Many Requests" in err or "Rate limit" in err or "rate limit" in err:
+                    logger.warning(f"Rate limit download {t} — attente 65s")
+                    time.sleep(65)
+                else:
+                    logger.error(f"Erreur download {t} (tentative {attempt+1}): {e}")
+                    time.sleep(2 ** attempt)
     logger.error(f"Fetch échoué pour {ticker} après tous les fallbacks")
     return None
 
