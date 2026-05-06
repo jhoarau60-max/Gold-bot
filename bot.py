@@ -1585,22 +1585,28 @@ async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_bytes = bytes(await file.download_as_bytearray())
         content = (" ".join(context.args) if context.args else update.message.caption) or "Image"
     elif update.message.video or update.message.video_note:
-        await update.message.reply_text("⏳ Analyse vidéo en cours...")
-        vid   = update.message.video or update.message.video_note
-        file  = await context.bot.get_file(vid.file_id)
-        vbytes = bytes(await file.download_as_bytearray())
+        vid = update.message.video or update.message.video_note
         caption = (" ".join(context.args) if context.args else update.message.caption) or "Vidéo"
-        try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            import google.generativeai as _g
-            resp  = model.generate_content([
-                {"mime_type": "video/mp4", "data": vbytes},
-                "Transcris et résume cette vidéo en français."
-            ])
-            content = f"[VIDÉO] {caption}\n{resp.text.strip()}"
-        except Exception as e:
-            content = f"[VIDÉO] {caption} (analyse échouée: {e})"
+        placeholder = {"content": f"[VIDÉO en cours] {caption}", "time": now, "photo_bytes": None}
+        gold_wiki_buffer.append(placeholder)
+        count = len(gold_wiki_buffer)
+        await update.message.reply_text(f"✅ Noté ({count} élément{'s' if count > 1 else ''} en attente — rapport à 22h)\n⏳ Transcription vidéo en arrière-plan...")
+        async def _transcribe():
+            try:
+                file = await context.bot.get_file(vid.file_id)
+                vbytes = bytes(await file.download_as_bytearray())
+                genai.configure(api_key=GEMINI_API_KEY)
+                model = genai.GenerativeModel("gemini-2.5-flash")
+                resp = model.generate_content([
+                    {"mime_type": "video/mp4", "data": vbytes},
+                    "Transcris et résume cette vidéo en français."
+                ])
+                placeholder["content"] = f"[VIDÉO] {caption}\n{resp.text.strip()}"
+                await update.message.reply_text("✅ Transcription vidéo terminée !")
+            except Exception as e:
+                placeholder["content"] = f"[VIDÉO] {caption} (analyse échouée: {e})"
+        asyncio.create_task(_transcribe())
+        return
     elif context.args:
         content = " ".join(context.args)
     elif update.message.text:
