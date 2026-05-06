@@ -1583,13 +1583,13 @@ async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         file  = await context.bot.get_file(photo.file_id)
         photo_bytes = bytes(await file.download_as_bytearray())
-        content = update.message.caption or "Image"
+        content = (" ".join(context.args) if context.args else update.message.caption) or "Image"
     elif update.message.video or update.message.video_note:
         await update.message.reply_text("⏳ Analyse vidéo en cours...")
         vid   = update.message.video or update.message.video_note
         file  = await context.bot.get_file(vid.file_id)
         vbytes = bytes(await file.download_as_bytearray())
-        caption = update.message.caption or "Vidéo"
+        caption = (" ".join(context.args) if context.args else update.message.caption) or "Vidéo"
         try:
             genai.configure(api_key=GEMINI_API_KEY)
             model = genai.GenerativeModel("gemini-2.5-flash")
