@@ -1603,6 +1603,8 @@ async def cmd_wiki(update: Update, context: ContextTypes.DEFAULT_TYPE):
             content = f"[VIDÉO] {caption} (analyse échouée: {e})"
     elif context.args:
         content = " ".join(context.args)
+    elif update.message.text:
+        content = update.message.text
     elif update.message.reply_to_message:
         content = update.message.reply_to_message.text or ""
     else:
@@ -1762,6 +1764,7 @@ async def main():
     app.add_handler(CommandHandler("myid",      cmd_myid))
     app.add_handler(CommandHandler("wiki",      cmd_wiki))
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
+    app.add_handler(MessageHandler((filters.Entity("url") | filters.Entity("text_link")) & filters.ChatType.PRIVATE, cmd_wiki))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE & filters.CaptionRegex(r'^/wiki'), cmd_wiki))
 
     await app.initialize()
