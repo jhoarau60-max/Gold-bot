@@ -1764,7 +1764,7 @@ async def main():
     app.add_handler(CommandHandler("myid",      cmd_myid))
     app.add_handler(CommandHandler("wiki",      cmd_wiki))
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
-    app.add_handler(MessageHandler((filters.Entity("url") | filters.Entity("text_link")) & filters.ChatType.PRIVATE, cmd_wiki))
+    app.add_handler(MessageHandler(filters.Regex(r'https?://\S+') & filters.ChatType.PRIVATE, cmd_wiki))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE & filters.CaptionRegex(r'^/wiki'), cmd_wiki))
 
     await app.initialize()
