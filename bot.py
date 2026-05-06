@@ -88,7 +88,7 @@ TICKER_TO_BOT = {
     "BTC-USD":  "oracle",
 }
 RISK_PER_TRADE  = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
-MAX_DAILY_LOSS  = 0.02   # 2 % de perte max par jour
+MAX_DAILY_LOSS  = 0.05   # 5 % de perte max par jour (phase test)
 TZ              = pytz.timezone("Europe/Brussels")
 TRADES_FILE     = "trades.json"
 
