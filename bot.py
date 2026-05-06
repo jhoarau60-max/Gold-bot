@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 from supabase import create_client, Client
 
@@ -1762,6 +1762,7 @@ async def main():
     app.add_handler(CommandHandler("myid",      cmd_myid))
     app.add_handler(CommandHandler("wiki",      cmd_wiki))
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
+    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE & filters.CaptionRegex(r'^/wiki'), cmd_wiki))
 
     await app.initialize()
     await app.start()
