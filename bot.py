@@ -436,11 +436,11 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append("✅ MACD baissier")
 
-    # 4. RSI (éviter surachat/survente — Wilder)
-    if 40 <= rsi <= 65:
+    # 4. RSI (zones resserrées — Wilder)
+    if 48 <= rsi <= 62:
         score_buy += 1
         reasons_buy.append(f"✅ RSI favorable achat ({rsi:.1f})")
-    elif 35 <= rsi <= 60:
+    elif 38 <= rsi <= 52:
         score_sell += 1
         reasons_sell.append(f"✅ RSI favorable vente ({rsi:.1f})")
     elif rsi > 75:
@@ -458,8 +458,8 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append(f"✅ Stochastique baissier ({stk:.1f})")
 
-    # 6. ADX — force de la tendance (Richard Dennis)
-    if adx > 25:
+    # 6. ADX — force de la tendance (Richard Dennis) — minimum 30
+    if adx > 30:
         if ema9 > ema21:
             score_buy += 1
             reasons_buy.append(f"✅ ADX fort ({adx:.1f}) — tendance haussière confirmée")
@@ -478,7 +478,7 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append(f"✅ Williams %R en zone de vente ({wr:.1f})")
 
-    threshold = 4
+    threshold = 5
     if score_buy >= threshold and score_buy > score_sell:
         return "BUY", score_buy, reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
@@ -1476,6 +1476,12 @@ async def trading_loop(app: Application):
         try:
             data        = load_data()
             instruments = get_instruments()
+
+            # Pause après 3 pertes consécutives (Druckenmiller — préserver le capital)
+            if data.get("loss_streak", 0) >= 3:
+                logger.info(f"Pause trading — {data['loss_streak']} pertes consécutives")
+                await asyncio.sleep(2 * 60 * 60)
+                continue
 
             for ticker, info in instruments.items():
                 df = await fetch_async(ticker)
