@@ -56,6 +56,22 @@ JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
 CAPITAL_INITIAL = float(ENV.get("CAPITAL", "50000"))
 
+OANDA_ACCOUNT_ID = ENV.get("OANDA_ACCOUNT_ID", "")
+OANDA_TOKEN      = ENV.get("OANDA_TOKEN", "")
+OANDA_PRACTICE   = ENV.get("OANDA_PRACTICE", "true").lower() != "false"
+OANDA_BASE_URL   = "https://api-fxpractice.oanda.com" if OANDA_PRACTICE else "https://api-fxtrade.oanda.com"
+OANDA_HEADERS    = {"Authorization": f"Bearer {OANDA_TOKEN}", "Content-Type": "application/json"}
+OANDA_INST_MAP   = {"XAUUSD=X": "XAU_USD", "XAGUSD=X": "XAG_USD"}
+OANDA_GRAN_MAP   = {"15m": "M15", "1h": "H1"}
+OANDA_COUNT_MAP  = {("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
+logger.info(f"OANDA configuré: account={bool(OANDA_ACCOUNT_ID)} token={bool(OANDA_TOKEN)} practice={OANDA_PRACTICE}")
+
+TWELVEDATA_KEY   = ENV.get("TWELVEDATA_KEY", "")
+TD_INST_MAP      = {"XAUUSD=X": "XAU/USD", "XAGUSD=X": "XAG/USD", "BTC-USD": "BTC/USD"}
+TD_INTERVAL_MAP  = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
+TD_COUNT_MAP     = {("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
+logger.info(f"Twelve Data configuré: key={bool(TWELVEDATA_KEY)}")
+
 SUPABASE_URL     = ENV.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = ENV.get("SUPABASE_SERVICE_KEY", "")
 logger.info(f"Supabase URL présente: {bool(SUPABASE_URL)} | Service key présente: {bool(SUPABASE_SERVICE_KEY)}")
@@ -193,6 +209,145 @@ def get_instruments() -> dict:
 
 
 # ── FETCH DONNÉES ──────────────────────────────────────────────────────────────
+
+def fetch_oanda_candles(ticker: str, count: int = 300, granularity: str = "M15") -> pd.DataFrame | None:
+    """Données temps réel OANDA → DataFrame compatible compute_indicators."""
+    if not OANDA_TOKEN:
+        return None
+    oanda_inst = OANDA_INST_MAP.get(ticker)
+    if not oanda_inst:
+        return None
+    try:
+        import httpx as _httpx
+        r = _httpx.get(
+            f"{OANDA_BASE_URL}/v3/instruments/{oanda_inst}/candles",
+            headers=OANDA_HEADERS,
+            params={"count": count, "granularity": granularity, "price": "M"},
+            timeout=15
+        )
+        if r.status_code != 200:
+            logger.error(f"OANDA candles {ticker}: {r.status_code} {r.text[:100]}")
+            return None
+        candles = [c for c in r.json().get("candles", []) if c.get("complete", True)]
+        if len(candles) < 10:
+            return None
+        rows = [{"Open": float(c["mid"]["o"]), "High": float(c["mid"]["h"]),
+                 "Low": float(c["mid"]["l"]), "Close": float(c["mid"]["c"]),
+                 "Volume": int(c.get("volume", 0))} for c in candles]
+        idx = pd.to_datetime([c["time"] for c in candles])
+        df = pd.DataFrame(rows, index=idx)
+        logger.info(f"OANDA fetch OK: {ticker} — {len(df)} bougies temps réel")
+        return df
+    except Exception as e:
+        logger.error(f"fetch_oanda_candles {ticker}: {e}")
+        return None
+
+
+def place_oanda_order(ticker: str, direction: str, units: float, sl: float, tp: float) -> str | None:
+    """Passe un ordre marché OANDA. Retourne trade_id ou None."""
+    if not OANDA_TOKEN or not OANDA_ACCOUNT_ID:
+        return None
+    oanda_inst = OANDA_INST_MAP.get(ticker)
+    if not oanda_inst:
+        return None
+    try:
+        import httpx as _httpx
+        oanda_units = str(int(abs(units))) if direction == "BUY" else str(-int(abs(units)))
+        if oanda_units in ("0", "-0"):
+            return None
+        payload = {"order": {
+            "type": "MARKET",
+            "instrument": oanda_inst,
+            "units": oanda_units,
+            "stopLossOnFill":   {"price": f"{sl:.5f}"},
+            "takeProfitOnFill": {"price": f"{tp:.5f}"},
+            "timeInForce": "FOK",
+            "positionFill": "DEFAULT",
+        }}
+        r = _httpx.post(
+            f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/orders",
+            headers=OANDA_HEADERS, json=payload, timeout=15
+        )
+        if r.status_code in (200, 201):
+            trade_id = r.json().get("orderFillTransaction", {}).get("tradeOpened", {}).get("tradeID")
+            logger.info(f"OANDA ordre OK: {oanda_inst} {direction} {oanda_units} → trade {trade_id}")
+            return trade_id
+        logger.error(f"OANDA ordre échoué: {r.status_code} {r.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"place_oanda_order {ticker}: {e}")
+        return None
+
+
+def close_oanda_trade(trade_id: str) -> bool:
+    """Ferme un trade OANDA par son ID."""
+    if not OANDA_TOKEN or not OANDA_ACCOUNT_ID or not trade_id:
+        return False
+    try:
+        import httpx as _httpx
+        r = _httpx.put(
+            f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_id}/close",
+            headers=OANDA_HEADERS, timeout=10
+        )
+        ok = r.status_code in (200, 201)
+        if ok:
+            logger.info(f"OANDA trade {trade_id} fermé")
+        else:
+            logger.error(f"OANDA close trade {trade_id}: {r.status_code} {r.text[:100]}")
+        return ok
+    except Exception as e:
+        logger.error(f"close_oanda_trade {trade_id}: {e}")
+        return False
+
+
+def fetch_twelvedata_candles(ticker: str, count: int = 300, interval: str = "15min") -> pd.DataFrame | None:
+    """Données temps réel Twelve Data → DataFrame compatible compute_indicators."""
+    if not TWELVEDATA_KEY:
+        return None
+    symbol = TD_INST_MAP.get(ticker)
+    if not symbol:
+        return None
+    try:
+        import httpx as _httpx
+        r = _httpx.get(
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol":     symbol,
+                "interval":   interval,
+                "outputsize": count,
+                "apikey":     TWELVEDATA_KEY,
+                "format":     "JSON",
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            logger.error(f"Twelve Data {ticker}: HTTP {r.status_code}")
+            return None
+        data = r.json()
+        if data.get("status") == "error":
+            logger.error(f"Twelve Data {ticker}: {data.get('message')}")
+            return None
+        values = data.get("values", [])
+        if len(values) < 10:
+            return None
+        # TD retourne newest first → reverse
+        values = list(reversed(values))
+        rows = [{
+            "Open":   float(v["open"]),
+            "High":   float(v["high"]),
+            "Low":    float(v["low"]),
+            "Close":  float(v["close"]),
+            "Volume": float(v.get("volume", 0) or 0),
+        } for v in values]
+        idx = pd.to_datetime([v["datetime"] for v in values])
+        df = pd.DataFrame(rows, index=idx)
+        logger.info(f"Twelve Data fetch OK: {ticker} — {len(df)} bougies temps réel")
+        return df
+    except Exception as e:
+        logger.error(f"fetch_twelvedata_candles {ticker}: {e}")
+        return None
+
+
 TICKER_FALLBACKS = {
     "XAUUSD=X": ["GC=F", "XAUUSD=X"],
     "XAGUSD=X": ["SI=F", "XAGUSD=X"],
@@ -208,6 +363,24 @@ async def fetch_async(ticker: str, period: str = "5d", interval: str = "15m"):
     return await asyncio.to_thread(fetch, ticker, period, interval)
 
 def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame | None:
+    # Twelve Data — priorité maximale (temps réel, pas de rate limit agressif)
+    if ticker in TD_INST_MAP and TWELVEDATA_KEY:
+        td_interval = TD_INTERVAL_MAP.get(interval, "15min")
+        count = TD_COUNT_MAP.get((period, interval), 300)
+        df = fetch_twelvedata_candles(ticker, count=count, interval=td_interval)
+        if df is not None and len(df) >= 10:
+            return df
+        logger.warning(f"Twelve Data fetch raté pour {ticker} — fallback OANDA")
+
+    # OANDA fallback pour XAU/XAG
+    if ticker in OANDA_INST_MAP and OANDA_TOKEN:
+        gran  = OANDA_GRAN_MAP.get(interval, "M15")
+        count = OANDA_COUNT_MAP.get((period, interval), 300)
+        df = fetch_oanda_candles(ticker, count=count, granularity=gran)
+        if df is not None and len(df) >= 10:
+            return df
+        logger.warning(f"OANDA fetch raté pour {ticker} — fallback yfinance")
+
     tickers_to_try = TICKER_FALLBACKS.get(ticker, [ticker])
     for t in tickers_to_try:
         # Ticker.history — tentative unique, pas de sleep (appelé depuis async)
@@ -551,7 +724,17 @@ def open_trade(data: dict, ticker: str, direction: str,
         "score":       score,
         "entry_time":  datetime.now(TZ).isoformat(),
         "pnl":         0.0,
+        "oanda_id":    None,
     }
+
+    # Ordre réel OANDA (XAU/XAG uniquement)
+    if ticker in OANDA_INST_MAP and OANDA_TOKEN:
+        oanda_id = place_oanda_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
+        if oanda_id:
+            pos["oanda_id"] = oanda_id
+        else:
+            logger.warning(f"Ordre OANDA échoué pour {ticker} — trade enregistré localement uniquement")
+
     data["open_positions"].append(pos)
     data["daily_trades"] += 1
     save_data(data)
