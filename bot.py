@@ -965,36 +965,141 @@ Sois précis, factuel, et pense comme un professionnel gérant des millions."""
         return f"Analyse IA indisponible ({str(e)[:80]})"
 
 
-# ── POLARIS ORACLE — RSS + IA PRÉDICTIVE ──────────────────────────────────────
-ORACLE_RSS_FEEDS = [
-    "https://cointelegraph.com/rss",
-    "https://cryptopanic.com/news/rss/",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://cryptoslate.com/feed/",
-    "https://www.theblock.co/rss.xml",
-]
+# ── POLARIS ORACLE — MULTI-MARCHÉ RSS + IA ────────────────────────────────────
 
-ORACLE_KEYWORDS = [
-    "bitcoin", "btc", "crypto", "fed", "inflation", "interest rate", "etf",
-    "sec", "regulation", "whale", "halving", "macro", "recession", "dollar",
-    "rate hike", "monetary", "blackrock", "microstrategy", "coinbase", "fomc",
-    "cpi", "gdp", "tariff", "sanctions", "war", "geopolit",
-]
+ORACLE_DOMAINS = {
+    "crypto": {
+        "name": "Crypto / Bitcoin",
+        "emoji": "₿",
+        "rss": [
+            "https://cointelegraph.com/rss",
+            "https://cryptopanic.com/news/rss/",
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://cryptoslate.com/feed/",
+            "https://www.theblock.co/rss.xml",
+        ],
+        "keywords": [
+            "bitcoin", "btc", "crypto", "fed", "inflation", "interest rate", "etf",
+            "sec", "regulation", "whale", "halving", "macro", "recession", "dollar",
+            "rate hike", "monetary", "blackrock", "microstrategy", "coinbase", "fomc",
+            "cpi", "gdp", "tariff", "sanctions", "war", "geopolit",
+        ],
+        "ticker": "BTC-USD",
+        "trade": True,
+    },
+    "metals": {
+        "name": "Or & Argent",
+        "emoji": "🥇",
+        "rss": [
+            "https://www.kitco.com/rss/kitcogoldnews.xml",
+            "https://feeds.marketwatch.com/marketwatch/marketpulse/",
+            "https://finance.yahoo.com/news/rssindex",
+        ],
+        "keywords": [
+            "gold", "silver", "xau", "xag", "precious metals", "inflation", "fed",
+            "dollar", "interest rate", "commodities", "bullion", "safe haven",
+            "central bank", "rate", "treasury", "bond yield", "hedge",
+        ],
+        "ticker": "XAUUSD=X",
+        "trade": True,
+    },
+    "energy": {
+        "name": "Pétrole & Énergie",
+        "emoji": "🛢️",
+        "rss": [
+            "https://oilprice.com/rss/main",
+            "https://feeds.reuters.com/reuters/businessNews",
+            "https://finance.yahoo.com/news/rssindex",
+        ],
+        "keywords": [
+            "oil", "crude", "opec", "petroleum", "brent", "wti", "energy",
+            "gas", "natural gas", "pipeline", "refinery", "barrel", "production",
+            "supply", "demand", "geopolitical", "iran", "saudi", "russia",
+        ],
+        "ticker": "CL=F",
+        "trade": False,
+    },
+    "bourse": {
+        "name": "Bourse & Indices",
+        "emoji": "📊",
+        "rss": [
+            "https://feeds.marketwatch.com/marketwatch/topstories/",
+            "https://finance.yahoo.com/news/rssindex",
+            "https://feeds.reuters.com/reuters/businessNews",
+        ],
+        "keywords": [
+            "stock", "market", "s&p", "nasdaq", "dow", "earnings", "fed",
+            "interest rate", "inflation", "recession", "gdp", "unemployment",
+            "rally", "correction", "bull", "bear", "ipo", "merger",
+        ],
+        "ticker": "^GSPC",
+        "trade": False,
+    },
+    "football": {
+        "name": "Football",
+        "emoji": "⚽",
+        "rss": [
+            "https://feeds.bbci.co.uk/sport/football/rss.xml",
+            "https://www.lequipe.fr/rss/actu_rss_Football.xml",
+            "https://www.eurosport.fr/football/rss.xml",
+        ],
+        "keywords": [
+            "football", "soccer", "match", "goal", "league", "champions",
+            "premier league", "ligue 1", "serie a", "bundesliga", "la liga",
+            "injury", "transfer", "win", "loss", "draw", "world cup", "euro",
+            "copa", "ucl", "form", "squad",
+        ],
+        "ticker": None,
+        "trade": False,
+    },
+    "tennis": {
+        "name": "Tennis",
+        "emoji": "🎾",
+        "rss": [
+            "https://feeds.bbci.co.uk/sport/tennis/rss.xml",
+            "https://www.eurosport.fr/tennis/rss.xml",
+        ],
+        "keywords": [
+            "tennis", "atp", "wta", "grand slam", "wimbledon", "roland garros",
+            "us open", "australian open", "djokovic", "alcaraz", "sinner",
+            "swiatek", "final", "semifinal", "injury", "ranking", "tournament",
+        ],
+        "ticker": None,
+        "trade": False,
+    },
+    "politique": {
+        "name": "Politique & Géopolitique",
+        "emoji": "🏛️",
+        "rss": [
+            "https://feeds.bbci.co.uk/news/politics/rss.xml",
+            "https://feeds.reuters.com/reuters/politicsNews",
+            "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+        ],
+        "keywords": [
+            "election", "vote", "president", "prime minister", "government",
+            "war", "peace", "sanctions", "trade", "tariff", "trump", "macron",
+            "geopolitical", "conflict", "agreement", "treaty", "summit", "nato",
+            "congress", "senate", "parliament", "policy",
+        ],
+        "ticker": None,
+        "trade": False,
+    },
+}
 
 
-def fetch_oracle_news(hours_back: int = 2) -> list[dict]:
+def fetch_oracle_news(rss_feeds: list, keywords: list, hours_back: int = 4) -> list[dict]:
     from email.utils import parsedate_to_datetime
     articles = []
     cutoff = datetime.now(pytz.utc) - pd.Timedelta(hours=hours_back)
 
-    for url in ORACLE_RSS_FEEDS:
+    for url in rss_feeds:
         try:
             feed = feedparser.parse(url)
             for entry in feed.entries[:25]:
-                title   = entry.get("title", "")
-                summary = entry.get("summary", "")[:300]
+                title      = entry.get("title", "")
+                summary    = entry.get("summary", "")[:300]
                 text_lower = (title + " " + summary).lower()
-                if not any(kw in text_lower for kw in ORACLE_KEYWORDS):
+                if not any(kw in text_lower for kw in keywords):
                     continue
                 try:
                     pub_dt = parsedate_to_datetime(entry.get("published", ""))
@@ -1020,102 +1125,113 @@ def fetch_oracle_news(hours_back: int = 2) -> list[dict]:
     return unique[:15]
 
 
-async def oracle_ai_signal(articles: list[dict], btc_df: pd.DataFrame) -> dict:
+async def oracle_ai_signal(articles: list[dict], domain_key: str, domain: dict,
+                           market_df: pd.DataFrame | None = None) -> dict:
     if not GEMINI_API_KEY:
         return {"direction": None, "confidence": 0, "summary": "Clé Gemini manquante"}
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model  = genai.GenerativeModel("gemini-2.5-flash")
-        btc_df = compute_indicators(btc_df)
-        c      = btc_df["Close"].squeeze()
-        price  = float(c.iloc[-1])
-        rsi    = float(btc_df["RSI"].iloc[-1])
-        adx    = float(btc_df["ADX"].iloc[-1])
-        ema200 = float(btc_df["EMA200"].iloc[-1])
-        chg24  = float((c.iloc[-1] / c.iloc[-24] - 1) * 100) if len(c) >= 24 else 0
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        tech_section = ""
+        if market_df is not None and len(market_df) >= 50:
+            mdf    = compute_indicators(market_df)
+            mc     = mdf["Close"].squeeze()
+            mprice = float(mc.iloc[-1])
+            mrsi   = float(mdf["RSI"].iloc[-1])
+            madx   = float(mdf["ADX"].iloc[-1])
+            mema200 = float(mdf["EMA200"].iloc[-1])
+            mchg24  = float((mc.iloc[-1] / mc.iloc[-24] - 1) * 100) if len(mc) >= 24 else 0
+            tech_section = (
+                f"\nDONNÉES TECHNIQUES {domain['name'].upper()} :\n"
+                f"- Prix : {mprice:.4f} | Variation 24h : {mchg24:+.2f}%\n"
+                f"- RSI : {mrsi:.1f} | ADX : {madx:.1f}\n"
+                f"- EMA200 : {mema200:.4f} | Tendance : {'HAUSSIÈRE' if mprice > mema200 else 'BAISSIÈRE'}\n"
+            )
 
         news_text = "\n".join([
             f"- [{a['source']}] {a['title']} — {a['summary'][:150]}"
             for a in articles
         ])
 
-        prompt = f"""Tu es Polaris Oracle — IA prédictive Bitcoin niveau institutionnel.
-Tu analyses actualités macro + crypto pour prédire la direction à court terme.
+        prompt = f"""Tu es Polaris Oracle — IA prédictive niveau institutionnel. Domaine : {domain['name']}.
 
-ACTUALITÉS RÉCENTES (dernières {len(articles)} heures) :
+ACTUALITÉS RÉCENTES ({len(articles)} articles) :
 {news_text}
-
-DONNÉES TECHNIQUES BTC/USD :
-- Prix : {price:.2f}$ | Variation 24h : {chg24:+.2f}%
-- RSI : {rsi:.1f} | ADX : {adx:.1f}
-- EMA200 : {ema200:.2f} | Tendance : {"HAUSSIÈRE" if price > ema200 else "BAISSIÈRE"}
-
-Réponds UNIQUEMENT en JSON valide, exactement ce format :
+{tech_section}
+Réponds UNIQUEMENT en JSON valide :
 {{
   "direction": "BUY" ou "SELL" ou "NEUTRAL",
   "confidence": <0-100>,
-  "timeframe": "4h" ou "12h" ou "24h",
+  "timeframe": "4h" ou "12h" ou "24h" ou "48h",
   "catalysts": ["raison 1", "raison 2"],
   "risk": "LOW" ou "MEDIUM" ou "HIGH",
-  "summary": "<1 phrase>"
+  "summary": "<1 phrase claire en français>"
 }}
 
+Pour {domain['name']} : BUY = signal favorable/hausse/issue positive attendue. SELL = signal défavorable/baisse/issue négative. NEUTRAL = incertain.
 Si pas d'info claire → NEUTRAL confidence < 50."""
 
-        resp      = model.generate_content(prompt)
+        resp       = model.generate_content(prompt)
         json_match = re.search(r'\{.*\}', resp.text.strip(), re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
         return {"direction": None, "confidence": 0, "summary": "Réponse non parsable"}
     except Exception as e:
-        logger.error(f"Oracle AI: {e}")
+        logger.error(f"Oracle AI {domain_key}: {e}")
         return {"direction": None, "confidence": 0, "summary": str(e)[:80]}
 
 
 async def oracle_loop(app: Application):
-    logger.info("Polaris Oracle démarré — analyse RSS toutes les heures, 24h/24")
-    last_hour = ""
+    logger.info("Polaris Oracle démarré — multi-marché 7 domaines, analyse toutes les 2h")
+    last_run: dict[str, str] = {}
+
     while True:
         try:
             now      = datetime.now(TZ)
-            now_hour = now.strftime("%Y-%m-%d-%H")
+            # Slot change toutes les 2h — chaque domaine tourne une fois par slot
+            time_slot = f"{now.strftime('%Y-%m-%d')}-{now.hour // 2}"
 
-            if now_hour != last_hour:
-                last_hour = now_hour
-                articles  = fetch_oracle_news(hours_back=2)
+            for domain_key, domain in ORACLE_DOMAINS.items():
+                slot_key = f"{domain_key}-{time_slot}"
+                if last_run.get(domain_key) == slot_key:
+                    continue
+
+                articles = fetch_oracle_news(domain["rss"], domain["keywords"], hours_back=4)
+                last_run[domain_key] = slot_key
 
                 if not articles:
-                    logger.info("Oracle — pas de news pertinentes")
-                    await asyncio.sleep(60 * 60)
+                    logger.info(f"Oracle {domain_key} — pas de news pertinentes")
                     continue
 
-                btc_df = await fetch_async("BTC-USD", period="10d", interval="1h")
-                if btc_df is None or len(btc_df) < 50:
-                    await asyncio.sleep(60 * 60)
-                    continue
+                market_df = None
+                if domain.get("ticker"):
+                    market_df = await fetch_async(domain["ticker"], period="10d", interval="1h")
 
-                signal     = await oracle_ai_signal(articles, btc_df)
+                signal     = await oracle_ai_signal(articles, domain_key, domain, market_df)
                 direction  = signal.get("direction")
                 confidence = int(signal.get("confidence", 0))
                 risk       = signal.get("risk", "MEDIUM")
                 risk_emoji = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(risk, "🟡")
                 dir_emoji  = "📈" if direction == "BUY" else "📉" if direction == "SELL" else "⚖️"
-                catalysts  = "\n".join([f"• {c}" for c in signal.get("catalysts", [])])
+                catalysts  = "\n".join([f"• {cat}" for cat in signal.get("catalysts", [])])
 
                 msg = (
-                    f"🔮 *POLARIS ORACLE — {now.strftime('%H:%M')}*\n\n"
-                    f"{dir_emoji} Direction : *{direction or 'NEUTRAL'}* | Confiance : `{confidence}%`\n"
+                    f"{domain['emoji']} *POLARIS ORACLE — {domain['name']}*\n"
+                    f"🕐 {now.strftime('%d/%m %H:%M')}\n\n"
+                    f"{dir_emoji} Signal : *{direction or 'NEUTRAL'}* | Confiance : `{confidence}%`\n"
                     f"⏱ Timeframe : `{signal.get('timeframe', '?')}`\n"
                     f"{risk_emoji} Risque : `{risk}`\n\n"
                     f"*Catalyseurs :*\n{catalysts}\n\n"
                     f"📌 {signal.get('summary', '')}\n"
                     f"📰 `{len(articles)} articles analysés`"
                 )
+
                 if JOHN_ID:
                     try:
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                     except Exception as e:
-                        logger.error(f"Oracle Telegram: {e}")
+                        logger.error(f"Oracle Telegram {domain_key}: {e}")
 
                 if sb_client:
                     try:
@@ -1127,33 +1243,38 @@ async def oracle_loop(app: Application):
                             "catalysts":      json.dumps(signal.get("catalysts", []), ensure_ascii=False),
                             "summary":        signal.get("summary", ""),
                             "articles_count": len(articles),
+                            "domain":         domain_key,
                             "created_at":     now.isoformat(),
                         }).execute()
-                        logger.info(f"Oracle signal écrit Supabase — {direction} {confidence}%")
+                        logger.info(f"Oracle {domain_key} — {direction} {confidence}% → Supabase OK")
                     except Exception as e:
-                        logger.error(f"Oracle Supabase insert: {e}")
+                        logger.error(f"Oracle Supabase {domain_key}: {e}")
 
-                if direction in ("BUY", "SELL") and confidence >= 75:
-                    data    = load_data()
-                    btc_15m = await fetch_async("BTC-USD", period="5d", interval="15m")
-                    if btc_15m is not None and len(btc_15m) >= 50:
-                        btc_15m = compute_indicators(btc_15m)
-                        price   = float(btc_15m["Close"].squeeze().iloc[-1])
-                        atr     = float(btc_15m["ATR"].iloc[-1])
-                        if not pd.isna(atr) and atr > 0:
-                            pos = open_trade(data, "BTC-USD", direction, price, atr, score=int(confidence / 10))
+                # Paper trade uniquement pour domaines financiers avec ticker
+                if domain.get("trade") and direction in ("BUY", "SELL") and confidence >= 75:
+                    data     = load_data()
+                    price_df = await fetch_async(domain["ticker"], period="5d", interval="15m")
+                    if price_df is not None and len(price_df) >= 50:
+                        price_df = compute_indicators(price_df)
+                        trade_price = float(price_df["Close"].squeeze().iloc[-1])
+                        trade_atr   = float(price_df["ATR"].iloc[-1])
+                        if not pd.isna(trade_atr) and trade_atr > 0:
+                            pos = open_trade(data, domain["ticker"], direction, trade_price, trade_atr,
+                                             score=int(confidence / 10))
                             if pos and JOHN_ID:
                                 try:
                                     await app.bot.send_message(
                                         JOHN_ID,
-                                        f"🔮 *Oracle → Trade BTC ouvert*\n"
+                                        f"🔮 *Oracle → Trade {domain['name']} ouvert*\n"
                                         f"Confiance `{confidence}%` ≥ 75% → position prise\n"
-                                        f"Prix : `{price:.2f}$` | *{direction}*\n"
-                                        f"SL : `{pos['sl']:.2f}$` | TP : `{pos['tp']:.2f}$`",
+                                        f"Prix : `{trade_price:.4f}` | *{direction}*\n"
+                                        f"SL : `{pos['sl']:.4f}` | TP : `{pos['tp']:.4f}`",
                                         parse_mode="Markdown"
                                     )
                                 except Exception:
                                     pass
+
+                await asyncio.sleep(5)  # délai entre domaines — évite rate limit Gemini
 
         except Exception as e:
             logger.error(f"Oracle loop: {e}")
@@ -1746,7 +1867,7 @@ async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rsi   = float(df["RSI"].iloc[-1])
         adx   = float(df["ADX"].iloc[-1])
 
-        sig_txt = f"*{direction}* (Score: {score}/7)" if direction else f"Pas de signal ({score}/7 requis: 4)"
+        sig_txt = f"*{direction}* (Score: {score}/7)" if direction else f"Pas de signal ({score}/7 requis: 5)"
         msg += (
             f"{info['emoji']} *{info['name']}*\n"
             f"Prix : `{price:.4f}`\n"
