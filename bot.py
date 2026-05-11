@@ -1787,12 +1787,16 @@ async def trading_loop(app: Application):
                 for pos, reason in exits:
                     pnl_e = pos.get("pnl", 0)
                     em = "✅" if pnl_e > 0 else "❌"
+                    restants = len(data.get("open_positions", []))
+                    restants_txt = f"Aucun trade en cours" if restants == 0 else f"{restants} trade(s) encore en cours"
                     msg = (
                         f"{em} *Trade fermé — {info['name']}*\n"
-                        f"Direction : {pos['direction']} (Score: {pos.get('score','?')}/7)\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Direction : {pos['direction']} | Confiance : `{pos.get('score','?')}/7`\n"
                         f"Entrée : `{pos['entry_price']:.4f}` → Sortie : `{price:.4f}`\n"
                         f"Raison : {reason}\n"
-                        f"P&L : `{pnl_e:+.2f} EUR` | Capital : `{data['capital']:.2f} EUR`"
+                        f"P&L : `{pnl_e:+.2f} €` | Capital : `{data['capital']:.2f} €`\n"
+                        f"📊 {restants_txt}"
                     )
                     try:
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
