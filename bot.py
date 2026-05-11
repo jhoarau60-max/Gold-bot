@@ -107,8 +107,8 @@ TZ              = pytz.timezone("Europe/Brussels")
 TRADES_FILE     = "trades.json"
 
 WEEKDAY_INSTRUMENTS = {
-    "XAUUSD=X": {"name": "Or (XAU/USD)",     "emoji": "🥇", "pip": 0.01},
-    "XAGUSD=X": {"name": "Argent (XAG/USD)", "emoji": "🥈", "pip": 0.001},
+    "XAUUSD=X": {"name": "Or (XAU/USD)", "emoji": "🥇", "pip": 0.01},
+    # XAG/USD retiré — Twelve Data requiert plan Grow/Venture pour l'argent
 }
 # ── DONNÉES PERSISTANTES ───────────────────────────────────────────────────────
 def _default_state() -> dict:
@@ -648,7 +648,8 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append(f"✅ Williams %R en zone de vente ({wr:.1f})")
 
-    threshold = 4
+    threshold = 3
+    logger.info(f"Signal XAU — BUY:{score_buy}/7 SELL:{score_sell}/7 (seuil:{threshold})")
     if score_buy >= threshold and score_buy > score_sell:
         return "BUY", score_buy, reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
