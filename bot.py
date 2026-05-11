@@ -1822,13 +1822,13 @@ async def trading_loop(app: Application):
                         em  = "📈" if direction == "BUY" else "📉"
                         pat = f"\n📊 Pattern : `{pattern}`" if pattern else ""
                         msg = (
-                            f"{em} *Nouveau trade — {info['name']}*\n"
-                            f"Direction : *{direction}* | Score : `{score}/7`\n"
-                            f"Prix entrée : `{price:.4f}`\n"
+                            f"{em} *TRADE EN COURS — {info['name']}*\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"Direction : *{direction}* | Confiance : `{score}/7`\n"
+                            f"Prix d'entrée : `{price:.4f}`\n"
                             f"Stop-Loss : `{pos['sl']:.4f}`\n"
-                            f"Take-Profit : `{pos['tp']:.4f}`\n"
-                            f"Quantité : `{pos['qty']}`{pat}\n\n"
-                            f"*Confirmations :*\n" +
+                            f"Take-Profit : `{pos['tp']:.4f}`{pat}\n\n"
+                            f"*Signaux déclencheurs :*\n" +
                             "\n".join(reasons[:4])
                         )
                         try:
