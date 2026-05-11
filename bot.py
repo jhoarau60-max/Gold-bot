@@ -2103,7 +2103,6 @@ async def main():
     await asyncio.gather(
         trading_loop(app),
         scheduler(app),
-        oracle_loop(app),
     )
 
 if __name__ == "__main__":
