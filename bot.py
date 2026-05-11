@@ -67,8 +67,8 @@ logger.info(f"OANDA configuré: account={bool(OANDA_ACCOUNT_ID)} token={bool(OAN
 
 TWELVEDATA_KEY   = ENV.get("TWELVEDATA_KEY", "")
 TD_INST_MAP      = {"XAUUSD=X": "XAU/USD", "XAGUSD=X": "XAG/USD"}
-TD_INTERVAL_MAP  = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
-TD_COUNT_MAP     = {("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
+TD_INTERVAL_MAP  = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
+TD_COUNT_MAP     = {("5d","5m"): 480, ("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
 logger.info(f"Twelve Data configuré: key={bool(TWELVEDATA_KEY)}")
 
 SUPABASE_URL     = ENV.get("SUPABASE_URL", "")
@@ -351,14 +351,14 @@ def _is_rate_limit(e: Exception) -> bool:
     s = str(e).lower()
     return "too many requests" in s or "rate limit" in s or "ratelimit" in s
 
-async def fetch_async(ticker: str, period: str = "5d", interval: str = "15m"):
+async def fetch_async(ticker: str, period: str = "5d", interval: str = "5m"):
     """Wrapper non-bloquant — exécute fetch() dans thread pool."""
     return await asyncio.to_thread(fetch, ticker, period, interval)
 
-def fetch(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame | None:
+def fetch(ticker: str, period: str = "5d", interval: str = "5m") -> pd.DataFrame | None:
     # Twelve Data — priorité maximale (temps réel, pas de rate limit agressif)
     if ticker in TD_INST_MAP and TWELVEDATA_KEY:
-        td_interval = TD_INTERVAL_MAP.get(interval, "15min")
+        td_interval = TD_INTERVAL_MAP.get(interval, "5min")
         count = TD_COUNT_MAP.get((period, interval), 300)
         df = fetch_twelvedata_candles(ticker, count=count, interval=td_interval)
         if df is not None and len(df) >= 10:
@@ -1441,7 +1441,7 @@ async def oracle_loop(app: Application):
         except Exception as e:
             logger.error(f"Oracle loop: {e}")
 
-        await asyncio.sleep(15 * 60)
+        await asyncio.sleep(5 * 60)
 
 
 # ── RAPPORTS ───────────────────────────────────────────────────────────────────
@@ -1754,7 +1754,7 @@ Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {t
 
 # ── BOUCLE DE TRADING ──────────────────────────────────────────────────────────
 async def trading_loop(app: Application):
-    logger.info("Boucle de trading démarrée — vérification toutes les 15 min")
+    logger.info("Boucle de trading démarrée — vérification toutes les 5 min")
     cycle = 0
     while True:
         try:
@@ -1828,7 +1828,7 @@ async def trading_loop(app: Application):
                         msg = (
                             f"{em} *TRADE EN COURS — {info['name']}*\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Timeframe : `15 minutes` | Durée estimée : `30min — 3h`\n"
+                            f"Timeframe : `5 minutes` | Durée estimée : `15min — 2h`\n"
                             f"Direction : *{direction}* | Confiance : `{score}/7`\n"
                             f"Prix d'entrée : `{price:.4f}`\n"
                             f"Stop-Loss : `{pos['sl']:.4f}`\n"
@@ -1841,8 +1841,8 @@ async def trading_loop(app: Application):
                         except Exception:
                             pass
 
-            # Résumé toutes les heures (cycle 4 = 4×15min)
-            if cycle % 4 == 0 and hourly_lines:
+            # Résumé toutes les heures (cycle 12 = 12×5min)
+            if cycle % 12 == 0 and hourly_lines:
                 now_str = datetime.now(TZ).strftime("%H:%M")
                 summary = f"🕐 *Surveillance {now_str}*\n\n" + "\n".join(hourly_lines)
                 try:
@@ -1853,7 +1853,7 @@ async def trading_loop(app: Application):
         except Exception as e:
             logger.error(f"Erreur boucle trading: {e}")
 
-        await asyncio.sleep(15 * 60)
+        await asyncio.sleep(5 * 60)
 
 
 # ── PLANIFICATEUR ──────────────────────────────────────────────────────────────
