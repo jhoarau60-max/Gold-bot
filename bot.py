@@ -11,8 +11,7 @@ Stratégie multi-indicateurs inspirée des plus grands traders :
 - Richard Dennis     : Turtle Trading — breakout + gestion rigoureuse du risque
 - Stanley Druckenmiller : concentration sur les meilleures opportunités
 
-Lundi-Vendredi : XAU/USD (Or) + XAG/USD (Argent)
-Samedi-Dimanche : BTC/USD (Bitcoin)
+7j/7 : XAU/USD (Or) + XAG/USD (Argent)
 """
 
 import asyncio
@@ -67,7 +66,7 @@ OANDA_COUNT_MAP  = {("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5
 logger.info(f"OANDA configuré: account={bool(OANDA_ACCOUNT_ID)} token={bool(OANDA_TOKEN)} practice={OANDA_PRACTICE}")
 
 TWELVEDATA_KEY   = ENV.get("TWELVEDATA_KEY", "")
-TD_INST_MAP      = {"XAUUSD=X": "XAU/USD", "XAGUSD=X": "XAG/USD", "BTC-USD": "BTC/USD"}
+TD_INST_MAP      = {"XAUUSD=X": "XAU/USD", "XAGUSD=X": "XAG/USD"}
 TD_INTERVAL_MAP  = {"15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
 TD_COUNT_MAP     = {("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
 logger.info(f"Twelve Data configuré: key={bool(TWELVEDATA_KEY)}")
@@ -101,7 +100,6 @@ else:
 TICKER_TO_BOT = {
     "XAUUSD=X": "gold",
     "XAGUSD=X": "silver",
-    "BTC-USD":  "oracle",
 }
 RISK_PER_TRADE  = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
 MAX_DAILY_LOSS  = 0.05   # 5 % de perte max par jour (phase test)
@@ -347,7 +345,6 @@ def fetch_twelvedata_candles(ticker: str, count: int = 300, interval: str = "15m
 TICKER_FALLBACKS = {
     "XAUUSD=X": ["GC=F", "XAUUSD=X"],
     "XAGUSD=X": ["SI=F", "XAGUSD=X"],
-    "BTC-USD":  ["BTC-USD"],
 }
 
 def _is_rate_limit(e: Exception) -> bool:
@@ -1151,25 +1148,6 @@ Sois précis, factuel, et pense comme un professionnel gérant des millions."""
 # ── POLARIS ORACLE — MULTI-MARCHÉ RSS + IA ────────────────────────────────────
 
 ORACLE_DOMAINS = {
-    "crypto": {
-        "name": "Crypto / Bitcoin",
-        "emoji": "₿",
-        "rss": [
-            "https://cointelegraph.com/rss",
-            "https://cryptopanic.com/news/rss/",
-            "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "https://cryptoslate.com/feed/",
-            "https://www.theblock.co/rss.xml",
-        ],
-        "keywords": [
-            "bitcoin", "btc", "crypto", "fed", "inflation", "interest rate", "etf",
-            "sec", "regulation", "whale", "halving", "macro", "recession", "dollar",
-            "rate hike", "monetary", "blackrock", "microstrategy", "coinbase", "fomc",
-            "cpi", "gdp", "tariff", "sanctions", "war", "geopolit",
-        ],
-        "ticker": "BTC-USD",
-        "trade": True,
-    },
     "metals": {
         "name": "Or & Argent",
         "emoji": "🥇",
