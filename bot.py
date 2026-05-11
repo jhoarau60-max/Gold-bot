@@ -1828,6 +1828,7 @@ async def trading_loop(app: Application):
                         msg = (
                             f"{em} *TRADE EN COURS — {info['name']}*\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
+                            f"Timeframe : `15 minutes`\n"
                             f"Direction : *{direction}* | Confiance : `{score}/7`\n"
                             f"Prix d'entrée : `{price:.4f}`\n"
                             f"Stop-Loss : `{pos['sl']:.4f}`\n"
