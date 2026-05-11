@@ -112,10 +112,6 @@ WEEKDAY_INSTRUMENTS = {
     "XAUUSD=X": {"name": "Or (XAU/USD)",     "emoji": "🥇", "pip": 0.01},
     "XAGUSD=X": {"name": "Argent (XAG/USD)", "emoji": "🥈", "pip": 0.001},
 }
-WEEKEND_INSTRUMENTS = {
-    "BTC-USD": {"name": "Bitcoin (BTC/USD)", "emoji": "₿", "pip": 1.0},
-}
-
 # ── DONNÉES PERSISTANTES ───────────────────────────────────────────────────────
 def _default_state() -> dict:
     return {
@@ -205,7 +201,7 @@ def save_data(data: dict):
             logger.error(f"save_data Supabase sync: {e}")
 
 def get_instruments() -> dict:
-    return WEEKEND_INSTRUMENTS if datetime.now(TZ).weekday() >= 5 else WEEKDAY_INSTRUMENTS
+    return WEEKDAY_INSTRUMENTS
 
 
 # ── FETCH DONNÉES ──────────────────────────────────────────────────────────────
@@ -2016,7 +2012,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    all_inst = {**WEEKDAY_INSTRUMENTS, **WEEKEND_INSTRUMENTS}
+    all_inst = WEEKDAY_INSTRUMENTS
     if not data["open_positions"]:
         await update.message.reply_text("📊 Aucune position ouverte actuellement.")
         return
@@ -2116,8 +2112,7 @@ async def main():
             await app.bot.send_message(
                 JOHN_ID,
                 "🟢 *GOLD BOT démarré !*\n\n"
-                "🥇 Or + 🥈 Argent (lun-ven)\n"
-                "₿ Bitcoin (sam-dim)\n\n"
+                "🥇 Or (XAU/USD) + 🥈 Argent (XAG/USD)\n\n"
                 "7 indicateurs — 5 stratégies de légende\n"
                 "Rapports automatiques 7h & 22h\n\n"
                 "Envoie /start pour voir les commandes",
