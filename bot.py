@@ -655,7 +655,7 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append(f"✅ Williams %R en zone de vente ({wr:.1f})")
 
-    threshold = 5
+    threshold = 4
     if score_buy >= threshold and score_buy > score_sell:
         return "BUY", score_buy, reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
@@ -1780,10 +1780,13 @@ Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {t
 # ── BOUCLE DE TRADING ──────────────────────────────────────────────────────────
 async def trading_loop(app: Application):
     logger.info("Boucle de trading démarrée — vérification toutes les 15 min")
+    cycle = 0
     while True:
         try:
             data        = load_data()
             instruments = get_instruments()
+            cycle += 1
+            hourly_lines = []
 
             # Pause après 3 pertes consécutives (Druckenmiller — préserver le capital)
             if data.get("loss_streak", 0) >= 3:
@@ -1829,6 +1832,14 @@ async def trading_loop(app: Application):
                 # Signal multi-critères
                 direction, score, reasons = compute_signal_score(df)
 
+                # Résumé horaire (toutes les 4 cycles = 1h)
+                rsi_val = float(df["RSI"].iloc[-1])
+                adx_val = float(df["ADX"].iloc[-1])
+                arrow = "📈" if direction == "BUY" else ("📉" if direction == "SELL" else "⏸")
+                hourly_lines.append(
+                    f"{arrow} *{info['name']}* — Score `{score}/7` | Prix `{price:.2f}` | RSI `{rsi_val:.1f}` | ADX `{adx_val:.1f}`"
+                )
+
                 if direction:
                     pos = open_trade(data, ticker, direction, price, atr, score)
                     data = load_data()
@@ -1849,6 +1860,15 @@ async def trading_loop(app: Application):
                             await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                         except Exception:
                             pass
+
+            # Résumé toutes les heures (cycle 4 = 4×15min)
+            if cycle % 4 == 0 and hourly_lines:
+                now_str = datetime.now(TZ).strftime("%H:%M")
+                summary = f"🕐 *Surveillance {now_str}*\n\n" + "\n".join(hourly_lines)
+                try:
+                    await app.bot.send_message(JOHN_ID, summary, parse_mode="Markdown")
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.error(f"Erreur boucle trading: {e}")
