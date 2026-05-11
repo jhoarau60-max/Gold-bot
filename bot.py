@@ -609,16 +609,20 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append("✅ MACD baissier")
 
-    # 4. RSI (zones resserrées — Wilder)
-    if 48 <= rsi <= 62:
+    # 4. RSI (Wilder) — zone élargie en tendance forte
+    strong_uptrend = adx > 30 and ema9 > ema21
+    if 45 <= rsi <= 75:
         score_buy += 1
         reasons_buy.append(f"✅ RSI favorable achat ({rsi:.1f})")
     elif 38 <= rsi <= 52:
         score_sell += 1
         reasons_sell.append(f"✅ RSI favorable vente ({rsi:.1f})")
     elif rsi > 75:
-        score_sell += 1
-        reasons_sell.append(f"⚠️ RSI en surachat ({rsi:.1f})")
+        if not strong_uptrend:
+            score_sell += 1
+            reasons_sell.append(f"⚠️ RSI en surachat ({rsi:.1f})")
+        else:
+            reasons_buy.append(f"ℹ️ RSI élevé ({rsi:.1f}) — tendance forte, momentum maintenu")
     elif rsi < 25:
         score_buy += 1
         reasons_buy.append(f"⚠️ RSI en survente ({rsi:.1f})")
