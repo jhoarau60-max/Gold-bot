@@ -20,7 +20,7 @@ import json
 import logging
 import io
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 import feedparser
@@ -101,8 +101,17 @@ TICKER_TO_BOT = {
     "XAUUSD=X": "gold",
     "XAGUSD=X": "silver",
 }
-RISK_PER_TRADE  = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
-MAX_DAILY_LOSS  = 0.05   # 5 % de perte max par jour (phase test)
+RISK_PER_TRADE      = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
+MAX_DAILY_LOSS      = 0.05   # 5 % de perte max par jour (phase test)
+MAX_POSITION_HOURS  = 4      # timeout auto-close : scalping max 4h
+
+# Plages de prix valides — protection contre données aberrantes yfinance
+PRICE_BOUNDS = {
+    "XAUUSD=X": (1200, 8000),
+    "XAGUSD=X": (8,    120),
+    "BTC-USD":  (5000, 500000),
+    "ETH-USD":  (500,  50000),
+}
 TZ              = pytz.timezone("Europe/Brussels")
 TRADES_FILE     = "trades.json"
 
@@ -143,9 +152,25 @@ def load_data_from_supabase() -> dict:
             base["loss_streak"]  = int(s.get("loss_streak") or 0)
             base["last_reset"]   = str(s.get("last_reset") or base["last_reset"])[:10]
 
-        # Positions ouvertes (avec SL/TP pour gérer les sorties)
+        # Positions ouvertes — ferme automatiquement les stale (> MAX_POSITION_HOURS)
         o_res = sb_client.table("trade_history").select("*").eq("status", "open").execute()
+        now_utc = datetime.now(pytz.utc)
+        stale_cutoff = (now_utc - timedelta(hours=MAX_POSITION_HOURS)).isoformat()
         for row in (o_res.data or []):
+            opened_at = row.get("opened_at") or ""
+            # Position trop ancienne : fermer dans Supabase, ne pas réimporter
+            if opened_at and opened_at < stale_cutoff:
+                try:
+                    sb_client.table("trade_history").update({
+                        "status":     "closed",
+                        "pnl":        0.0,
+                        "price_exit": float(row.get("price_entry") or 0),
+                        "closed_at":  now_utc.isoformat(),
+                    }).eq("id", row["id"]).execute()
+                    logger.info(f"Position stale fermée au démarrage: {row['symbol']} (ouverte {opened_at})")
+                except Exception as e:
+                    logger.error(f"Fermeture stale échouée: {e}")
+                continue
             if row.get("sl") and row.get("tp") and row.get("qty"):
                 base["open_positions"].append({
                     "ticker":      row["symbol"],
@@ -154,7 +179,7 @@ def load_data_from_supabase() -> dict:
                     "sl":          float(row["sl"]),
                     "tp":          float(row["tp"]),
                     "qty":         float(row["qty"]),
-                    "score":       int(row.get("score") or 0),
+                    "score":       min(int(row.get("score") or 0), 7),
                     "entry_time":  str(row.get("opened_at") or ""),
                     "pnl":         0.0,
                     "supabase_id": row["id"],
@@ -651,9 +676,9 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
     threshold = 3
     logger.info(f"Signal XAU — BUY:{score_buy}/7 SELL:{score_sell}/7 (seuil:{threshold})")
     if score_buy >= threshold and score_buy > score_sell:
-        return "BUY", score_buy, reasons_buy
+        return "BUY", min(score_buy, 7), reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
-        return "SELL", score_sell, reasons_sell
+        return "SELL", min(score_sell, 7), reasons_sell
     return None, max(score_buy, score_sell), []
 
 
@@ -695,6 +720,13 @@ def update_investor_profiles(pnl: float):
 # ── GESTION DES POSITIONS ──────────────────────────────────────────────────────
 def open_trade(data: dict, ticker: str, direction: str,
                price: float, atr: float, score: int) -> dict | None:
+    # Sanity check prix — rejette données yfinance aberrantes
+    if ticker in PRICE_BOUNDS:
+        lo, hi = PRICE_BOUNDS[ticker]
+        if not (lo <= price <= hi):
+            logger.error(f"Prix aberrant {ticker}: {price:.2f} (attendu {lo}–{hi}) — trade annulé")
+            return None
+
     if data["daily_pnl"] <= -(data["capital"] * MAX_DAILY_LOSS):
         logger.info("Limite perte journalière atteinte")
         return None
@@ -777,8 +809,19 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
 
         pos["pnl"] = round(pnl, 2)
 
-        if hit_sl or hit_tp:
-            reason = "✅ Take Profit" if hit_tp else "🛑 Stop Loss"
+        # Timeout auto-close : scalping max MAX_POSITION_HOURS
+        entry_dt = pos.get("entry_time", "")
+        try:
+            entry_dt = datetime.fromisoformat(entry_dt)
+            if entry_dt.tzinfo is None:
+                entry_dt = TZ.localize(entry_dt)
+            age_h = (datetime.now(TZ) - entry_dt).total_seconds() / 3600
+        except Exception:
+            age_h = 0
+        timeout_hit = age_h > MAX_POSITION_HOURS
+
+        if hit_sl or hit_tp or timeout_hit:
+            reason = "✅ Take Profit" if hit_tp else ("⏰ Timeout" if timeout_hit else "🛑 Stop Loss")
             pos["exit_price"] = round(price, 5)
             pos["exit_time"]  = datetime.now(TZ).isoformat()
             pos["exit_reason"] = reason
