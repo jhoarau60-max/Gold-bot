@@ -71,8 +71,8 @@ TD_INTERVAL_MAP  = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": 
 TD_COUNT_MAP     = {("5d","5m"): 480, ("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
 logger.info(f"Twelve Data configuré: key={bool(TWELVEDATA_KEY)}")
 
-SUPABASE_URL     = ENV.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = ENV.get("SUPABASE_SERVICE_KEY", "")
+SUPABASE_URL     = ENV.get("SUPABASE_URL", "") or ENV.get("WIKI_SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = ENV.get("SUPABASE_SERVICE_KEY", "") or ENV.get("WIKI_SUPABASE_KEY", "")
 logger.info(f"Supabase URL présente: {bool(SUPABASE_URL)} | Service key présente: {bool(SUPABASE_SERVICE_KEY)}")
 sb_client: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
