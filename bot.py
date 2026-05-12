@@ -122,16 +122,19 @@ WEEKDAY_INSTRUMENTS = {
 # ── DONNÉES PERSISTANTES ───────────────────────────────────────────────────────
 def _default_state() -> dict:
     return {
-        "capital":        CAPITAL_INITIAL,
-        "open_positions": [],
-        "closed_trades":  [],
-        "daily_pnl":      0.0,
-        "daily_trades":   0,
-        "total_pnl":      0.0,
-        "last_reset":     datetime.now(TZ).strftime("%Y-%m-%d"),
-        "start_date":     datetime.now(TZ).strftime("%Y-%m-%d"),
-        "win_streak":     0,
-        "loss_streak":    0,
+        "capital":              CAPITAL_INITIAL,
+        "open_positions":       [],
+        "closed_trades":        [],
+        "daily_pnl":            0.0,
+        "daily_trades":         0,
+        "total_pnl":            0.0,
+        "last_reset":           datetime.now(TZ).strftime("%Y-%m-%d"),
+        "start_date":           datetime.now(TZ).strftime("%Y-%m-%d"),
+        "win_streak":           0,
+        "loss_streak":          0,
+        "instrument_losses":    {},
+        "instrument_blacklist": {},
+        "learned_params":       {},
     }
 
 def load_data_from_supabase() -> dict:
@@ -225,6 +228,63 @@ def save_data(data: dict):
 
 def get_instruments() -> dict:
     return WEEKDAY_INSTRUMENTS
+
+def is_trading_session() -> bool:
+    """London (7h-17h) + NY (13h-22h) Paris. Or suit ces sessions."""
+    h = datetime.now(TZ).hour
+    return 7 <= h < 22
+
+def save_learned_params(params: dict):
+    """Persiste les params Gemini dans wiki_knowledge (survie redéploiement)."""
+    if not wiki_sb_client:
+        return
+    try:
+        wiki_sb_client.table("wiki_knowledge").upsert({
+            "slug":         "goldbot-learned-params",
+            "title":        "Gold Bot — Paramètres appris",
+            "type":         "params",
+            "summary":      f"Mis à jour {datetime.now(TZ).strftime('%Y-%m-%d %H:%M')}",
+            "full_content": json.dumps(params),
+            "created_at":   datetime.now(TZ).isoformat(),
+        }, on_conflict="slug").execute()
+    except Exception as e:
+        logger.error(f"save_learned_params: {e}")
+
+def load_learned_params() -> dict:
+    """Charge les params Gemini depuis Supabase au démarrage."""
+    if not wiki_sb_client:
+        return {}
+    try:
+        res = wiki_sb_client.table("wiki_knowledge").select("full_content").eq("slug", "goldbot-learned-params").execute()
+        if res.data:
+            return json.loads(res.data[0]["full_content"])
+    except Exception as e:
+        logger.error(f"load_learned_params: {e}")
+    return {}
+
+def adaptive_params(data: dict) -> dict:
+    """Niveau 1 : ajuste risque/seuil selon win rate glissant.
+    Niveau 2 : applique les overrides Gemini (bornés)."""
+    recent  = data.get("closed_trades", [])[-20:]
+    learned = data.get("learned_params", {})
+
+    if len(recent) < 5:
+        base = {"threshold": 4, "risk_per_trade": 0.01, "sl_mult": 1.5, "tp_mult": 3.75, "mode": "démarrage"}
+    else:
+        wr = sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent)
+        if wr < 0.35:
+            base = {"threshold": 5, "risk_per_trade": 0.005, "sl_mult": 2.0, "tp_mult": 4.5, "mode": "récupération"}
+        elif wr > 0.65:
+            base = {"threshold": 4, "risk_per_trade": 0.015, "sl_mult": 1.2, "tp_mult": 3.0, "mode": "sélectif"}
+        else:
+            base = {"threshold": 4, "risk_per_trade": 0.01, "sl_mult": 1.5, "tp_mult": 3.75, "mode": "normal"}
+
+    if learned:
+        if "threshold"      in learned: base["threshold"]      = max(3, min(6,   int(learned["threshold"])))
+        if "risk_per_trade" in learned: base["risk_per_trade"] = max(0.003, min(0.02, float(learned["risk_per_trade"])))
+        if "sl_mult"        in learned: base["sl_mult"]        = max(1.0, min(3.0, float(learned["sl_mult"])))
+        if "tp_mult"        in learned: base["tp_mult"]        = max(2.0, min(6.0, float(learned["tp_mult"])))
+    return base
 
 
 # ── FETCH DONNÉES ──────────────────────────────────────────────────────────────
@@ -379,6 +439,30 @@ def _is_rate_limit(e: Exception) -> bool:
 async def fetch_async(ticker: str, period: str = "5d", interval: str = "5m"):
     """Wrapper non-bloquant — exécute fetch() dans thread pool."""
     return await asyncio.to_thread(fetch, ticker, period, interval)
+
+def resample_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame | None:
+    """Convertit 5min/15min → 1H par resampling (0 crédit API supplémentaire)."""
+    try:
+        df = df_5m.resample("1h").agg(
+            {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        ).dropna()
+        return compute_indicators(df) if len(df) >= 10 else None
+    except Exception:
+        return None
+
+def get_1h_trend(df_base: pd.DataFrame) -> str:
+    """Tendance macro 1H depuis données de base resampleées. Retourne UP/DOWN/NEUTRAL."""
+    df1h = resample_to_1h(df_base)
+    if df1h is None:
+        return "NEUTRAL"
+    close = float(df1h["Close"].squeeze().iloc[-1])
+    ema21 = float(df1h["EMA21"].iloc[-1])
+    ema50 = float(df1h["EMA50"].iloc[-1])
+    if close > ema50 and ema21 > ema50:
+        return "UP"
+    elif close < ema50 and ema21 < ema50:
+        return "DOWN"
+    return "NEUTRAL"
 
 def fetch(ticker: str, period: str = "5d", interval: str = "5m") -> pd.DataFrame | None:
     # Twelve Data — priorité maximale (temps réel, pas de rate limit agressif)
@@ -733,7 +817,7 @@ def update_investor_profiles(pnl: float):
 
 # ── GESTION DES POSITIONS ──────────────────────────────────────────────────────
 def open_trade(data: dict, ticker: str, direction: str,
-               price: float, atr: float, score: int) -> dict | None:
+               price: float, atr: float, score: int, params: dict = None) -> dict | None:
     # Sanity check prix — rejette données yfinance aberrantes
     if ticker in PRICE_BOUNDS:
         lo, hi = PRICE_BOUNDS[ticker]
@@ -748,27 +832,33 @@ def open_trade(data: dict, ticker: str, direction: str,
         if p["ticker"] == ticker:
             return None
 
-    # Stop-loss adaptatif (1.5× ATR — méthode Turtle Trading)
-    sl_dist = atr * 1.5
-    tp_dist = atr * 3.75  # ratio risque/récompense 1:2.5 (relevé pour compenser win rate ~60%)
+    sl_mult = params["sl_mult"]        if params else 1.5
+    tp_mult = params["tp_mult"]        if params else 3.75
+    risk    = params["risk_per_trade"] if params else RISK_PER_TRADE
+    sl_dist = atr * sl_mult
+    tp_dist = atr * tp_mult
 
     sl = price - sl_dist if direction == "BUY" else price + sl_dist
     tp = price + tp_dist if direction == "BUY" else price - tp_dist
-    qty = round((data["capital"] * RISK_PER_TRADE) / sl_dist, 6)
+    qty = round((data["capital"] * risk) / sl_dist, 6)
     if qty <= 0:
         return None
 
     pos = {
-        "ticker":      ticker,
-        "direction":   direction,
-        "entry_price": round(price, 5),
-        "sl":          round(sl, 5),
-        "tp":          round(tp, 5),
-        "qty":         qty,
-        "score":       score,
-        "entry_time":  datetime.now(TZ).isoformat(),
-        "pnl":         0.0,
-        "oanda_id":    None,
+        "ticker":           ticker,
+        "direction":        direction,
+        "entry_price":      round(price, 5),
+        "sl":               round(sl, 5),
+        "tp":               round(tp, 5),
+        "qty":              qty,
+        "score":            score,
+        "entry_time":       datetime.now(TZ).isoformat(),
+        "pnl":              0.0,
+        "oanda_id":         None,
+        "atr_entry":        atr,
+        "sl_mult":          sl_mult,
+        "trail_peak":       price,
+        "trailing_active":  False,
     }
 
     # Ordre réel OANDA (XAU/XAG uniquement)
@@ -836,8 +926,8 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
 
         if hit_sl or hit_tp or timeout_hit:
             reason = "✅ Take Profit" if hit_tp else ("⏰ Timeout" if timeout_hit else "🛑 Stop Loss")
-            pos["exit_price"] = round(price, 5)
-            pos["exit_time"]  = datetime.now(TZ).isoformat()
+            pos["exit_price"]  = round(price, 5)
+            pos["exit_time"]   = datetime.now(TZ).isoformat()
             pos["exit_reason"] = reason
             data["closed_trades"].append(pos)
             data["daily_pnl"] += pnl
@@ -846,9 +936,15 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
             if pnl > 0:
                 data["win_streak"]  = data.get("win_streak", 0) + 1
                 data["loss_streak"] = 0
+                data.setdefault("instrument_losses", {})[ticker] = 0
             else:
                 data["loss_streak"] = data.get("loss_streak", 0) + 1
                 data["win_streak"]  = 0
+                losses = data.setdefault("instrument_losses", {})
+                losses[ticker] = losses.get(ticker, 0) + 1
+                if losses[ticker] >= 3:
+                    data.setdefault("instrument_blacklist", {})[ticker] = datetime.now(TZ).timestamp() + 86400
+                    logger.warning(f"Blacklist 24h {ticker} — 3 pertes consécutives")
             if sb_client and "supabase_id" in pos:
                 try:
                     sb_client.table("trade_history").update({
@@ -861,9 +957,42 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
                     logger.error(f"Supabase update trade: {e}")
 
             update_investor_profiles(pnl)
-
             closed.append((pos, reason))
         else:
+            # Trailing stop : suit le prix favorable
+            atr_e      = pos.get("atr_entry", 0)
+            sl_m       = pos.get("sl_mult", 1.5)
+            trail_dist = atr_e * sl_m
+            d_pos      = pos["direction"]
+            if atr_e > 0:
+                if d_pos == "BUY":
+                    if price > pos.get("trail_peak", price):
+                        pos["trail_peak"] = price
+                    if not pos.get("trailing_active") and price >= pos["entry_price"] + atr_e:
+                        pos["trailing_active"] = True
+                        logger.info(f"Trailing activé {ticker} BUY")
+                    if pos.get("trailing_active"):
+                        new_sl = pos["trail_peak"] - trail_dist
+                        if new_sl > pos["sl"]:
+                            pos["sl"] = round(new_sl, 5)
+                else:
+                    if price < pos.get("trail_peak", price):
+                        pos["trail_peak"] = price
+                    if not pos.get("trailing_active") and price <= pos["entry_price"] - atr_e:
+                        pos["trailing_active"] = True
+                        logger.info(f"Trailing activé {ticker} SELL")
+                    if pos.get("trailing_active"):
+                        new_sl = pos["trail_peak"] + trail_dist
+                        if new_sl < pos["sl"]:
+                            pos["sl"] = round(new_sl, 5)
+            if sb_client and "supabase_id" in pos:
+                try:
+                    sb_client.table("trade_history").update({
+                        "pnl": round(pnl, 2),
+                        "sl":  round(pos["sl"], 5),
+                    }).eq("id", pos["supabase_id"]).execute()
+                except Exception as e:
+                    logger.error(f"Supabase update open pnl: {e}")
             remaining.append(pos)
 
     data["open_positions"] = remaining
@@ -1730,6 +1859,87 @@ Journée {today} : {len(today_trades)} trades, taux réussite {wr:.1f}%, P&L {da
     logger.info(f"Journal journalier poussé: {slug}")
 
 
+async def gemini_param_adjustment(app: Application, data: dict):
+    """Niveau 2 — Gemini analyse les trades et ajuste réellement les paramètres."""
+    if not GEMINI_API_KEY:
+        return
+    recent = data.get("closed_trades", [])[-30:]
+    if len(recent) < 5:
+        return
+
+    by_inst: dict = {}
+    for t in recent:
+        tk = t.get("ticker", "?")
+        if tk not in by_inst:
+            by_inst[tk] = {"wins": 0, "losses": 0, "pnl": 0.0}
+        if t.get("pnl", 0) > 0: by_inst[tk]["wins"]   += 1
+        else:                    by_inst[tk]["losses"] += 1
+        by_inst[tk]["pnl"] += t.get("pnl", 0)
+
+    inst_summary = "\n".join(f"- {k}: {v['wins']}G/{v['losses']}P | P&L {v['pnl']:+.2f}€" for k, v in by_inst.items())
+    wr = sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent) * 100
+    current = data.get("learned_params", {})
+
+    prompt = f"""Bot de trading Or (XAU/USD). Analyse et recommande des ajustements JSON.
+
+PERFORMANCE ({len(recent)} trades) :
+- Win rate : {wr:.1f}%
+- P&L : {sum(t.get('pnl',0) for t in recent):+.2f}€
+
+PAR INSTRUMENT :
+{inst_summary}
+
+PARAMS ACTUELS : {json.dumps(current if current else {{"threshold":4,"risk_per_trade":0.01,"sl_mult":1.5,"tp_mult":3.75}})}
+
+RÈGLES : Si instrument 0G/2+P → blacklist 7j. Si WR<40% → réduire risque, augmenter seuil.
+
+JSON UNIQUEMENT (pas de markdown) :
+{{"threshold":4,"risk_per_trade":0.01,"sl_mult":1.5,"tp_mult":3.75,"blacklist":{{"TICKER":86400}},"rationale":"explication"}}
+"""
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model  = genai.GenerativeModel("gemini-2.5-flash")
+        resp   = model.generate_content(prompt)
+        raw    = resp.text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json\n"):
+                raw = raw[5:]
+        params_new = json.loads(raw)
+
+        learned = {
+            "threshold":      max(3, min(6,   int(params_new.get("threshold",      4)))),
+            "risk_per_trade": max(0.003, min(0.02, float(params_new.get("risk_per_trade", 0.01)))),
+            "sl_mult":        max(1.0, min(3.0,    float(params_new.get("sl_mult",        1.5)))),
+            "tp_mult":        max(2.0, min(6.0,    float(params_new.get("tp_mult",        3.75)))),
+            "rationale":      str(params_new.get("rationale", "")),
+            "updated_at":     datetime.now(TZ).isoformat(),
+        }
+        for tk, secs in params_new.get("blacklist", {}).items():
+            data.setdefault("instrument_blacklist", {})[tk] = datetime.now(TZ).timestamp() + int(secs)
+
+        data["learned_params"] = learned
+        save_data(data)
+        save_learned_params(learned)
+
+        try:
+            await app.bot.send_message(
+                JOHN_ID,
+                f"🤖 *Gold Bot — Paramètres auto-ajustés*\n\n"
+                f"Seuil : `{learned['threshold']}/7` | Risque : `{learned['risk_per_trade']*100:.1f}%`\n"
+                f"SL : `{learned['sl_mult']}×ATR` | TP : `{learned['tp_mult']}×ATR`\n\n"
+                f"💬 _{learned['rationale']}_",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        logger.info(f"Params Gemini Gold Bot appliqués: {learned}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Gemini params JSON invalide Gold Bot: {e}")
+    except Exception as e:
+        logger.error(f"gemini_param_adjustment Gold Bot: {e}")
+
+
 async def weekly_audit(app: Application, data: dict):
     """Audit hebdomadaire dimanche — Gemini analyse + wiki push."""
     now     = datetime.now(TZ)
@@ -1807,6 +2017,7 @@ Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {t
         except Exception:
             pass
     logger.info(f"Audit hebdomadaire envoyé: {slug}")
+    await gemini_param_adjustment(app, data)
 
 
 # ── BOUCLE DE TRADING ──────────────────────────────────────────────────────────
@@ -1820,13 +2031,37 @@ async def trading_loop(app: Application):
             cycle += 1
             hourly_lines = []
 
+            # Filtre session : or actif London/NY uniquement (7h-22h Paris)
+            if not is_trading_session():
+                logger.info("Hors session — reprise à 7h Paris")
+                await asyncio.sleep(30 * 60)
+                continue
+
+            # Nettoyer blacklist expirée
+            now_ts = datetime.now(TZ).timestamp()
+            bl = data.get("instrument_blacklist", {})
+            expired = [k for k, exp in bl.items() if now_ts > exp]
+            for k in expired:
+                del bl[k]
+                data.setdefault("instrument_losses", {})[k] = 0
+            if expired:
+                save_data(data)
+
             # Pause après 3 pertes consécutives (Druckenmiller — préserver le capital)
             if data.get("loss_streak", 0) >= 3:
                 logger.info(f"Pause trading — {data['loss_streak']} pertes consécutives")
                 await asyncio.sleep(2 * 60 * 60)
                 continue
 
+            params = adaptive_params(data)
+            logger.info(f"Mode adaptatif : {params['mode']} — seuil {params['threshold']}/7")
+
             for ticker, info in instruments.items():
+                # Skip instrument blacklisté
+                if ticker in data.get("instrument_blacklist", {}):
+                    logger.info(f"Skip {ticker} — blacklisté")
+                    continue
+
                 df = await fetch_async(ticker)
                 if df is None or len(df) < 50:
                     continue
@@ -1877,7 +2112,15 @@ async def trading_loop(app: Application):
                 )
 
                 if direction:
-                    pos = open_trade(data, ticker, direction, price, atr, score)
+                    # 1H multi-timeframe : signal doit être aligné avec tendance macro
+                    trend_1h = get_1h_trend(df)
+                    dir_map  = {"BUY": "UP", "SELL": "DOWN"}
+                    if trend_1h != "NEUTRAL" and trend_1h != dir_map.get(direction):
+                        logger.info(f"Skip {ticker} — signal {direction} contre tendance 1H ({trend_1h})")
+                        direction = None
+
+                if direction:
+                    pos = open_trade(data, ticker, direction, price, atr, score, params=params)
                     data = load_data()
                     if pos:
                         em  = "📈" if direction == "BUY" else "📉"
