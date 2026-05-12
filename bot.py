@@ -673,12 +673,26 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         score_sell += 1
         reasons_sell.append(f"✅ Williams %R en zone de vente ({wr:.1f})")
 
-    threshold = 3
-    logger.info(f"Signal XAU — BUY:{score_buy}/7 SELL:{score_sell}/7 (seuil:{threshold})")
+    threshold = 4  # Relevé 3→4 : exige plus de confirmations avant d'entrer
+
+    # Filtre ADX obligatoire — pas de trade en consolidation (ADX < 22)
+    if adx < 22:
+        logger.info(f"Signal bloqué — ADX trop faible ({adx:.1f}) : marché en range, pas de trade")
+        return None, max(score_buy, score_sell), []
+
+    # Filtre EMA200 obligatoire — trade UNIQUEMENT dans le sens de la tendance principale
     if score_buy >= threshold and score_buy > score_sell:
+        if c < ema200:
+            logger.info(f"BUY bloqué — prix ({c:.2f}) sous EMA200 ({ema200:.2f}) : contre-tendance")
+            return None, score_buy, []
         return "BUY", min(score_buy, 7), reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
+        if c > ema200:
+            logger.info(f"SELL bloqué — prix ({c:.2f}) au-dessus EMA200 ({ema200:.2f}) : contre-tendance")
+            return None, score_sell, []
         return "SELL", min(score_sell, 7), reasons_sell
+
+    logger.info(f"Signal XAU — BUY:{score_buy}/7 SELL:{score_sell}/7 (seuil:{threshold}) — pas assez fort")
     return None, max(score_buy, score_sell), []
 
 
@@ -736,7 +750,7 @@ def open_trade(data: dict, ticker: str, direction: str,
 
     # Stop-loss adaptatif (1.5× ATR — méthode Turtle Trading)
     sl_dist = atr * 1.5
-    tp_dist = atr * 3.0   # ratio risque/récompense 1:2
+    tp_dist = atr * 3.75  # ratio risque/récompense 1:2.5 (relevé pour compenser win rate ~60%)
 
     sl = price - sl_dist if direction == "BUY" else price + sl_dist
     tp = price + tp_dist if direction == "BUY" else price - tp_dist
