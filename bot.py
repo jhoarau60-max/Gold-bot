@@ -2051,6 +2051,8 @@ async def trading_loop(app: Application):
             if data.get("loss_streak", 0) >= 3:
                 logger.info(f"Pause trading — {data['loss_streak']} pertes consécutives")
                 await asyncio.sleep(2 * 60 * 60)
+                data["loss_streak"] = 0  # Reset après pause — évite boucle infinie
+                save_data(data)
                 continue
 
             params = adaptive_params(data)
