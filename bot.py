@@ -152,7 +152,7 @@ def load_data_from_supabase() -> dict:
             base["daily_pnl"]    = float(s.get("daily_pnl") or 0)
             base["daily_trades"] = int(s.get("daily_trades") or 0)
             base["win_streak"]   = int(s.get("win_streak") or 0)
-            base["loss_streak"]  = int(s.get("loss_streak") or 0)
+            base["loss_streak"]  = 0  # Reset au démarrage — pertes d'avant redeploy ne bloquent pas
             base["last_reset"]   = str(s.get("last_reset") or base["last_reset"])[:10]
 
         # Positions ouvertes — ferme automatiquement les stale (> MAX_POSITION_HOURS)
