@@ -350,41 +350,42 @@ FEATURE_COLS = [
 ]
 
 async def init_ml_db(app=None):
-    """Vérifie que la table gold_ml_features existe dans Supabase."""
-    if not sb_client:
-        logger.warning("ML Supabase: sb_client non dispo — ML désactivé")
+    """Crée gold_ml_features dans Supabase si nécessaire (psycopg2 DDL direct)."""
+    db_url = ENV.get("DATABASE_URL", "")
+    if not db_url:
+        logger.warning("ML: DATABASE_URL manquant — ML désactivé (ajoute-la dans Railway)")
         return
     try:
-        sb_client.table("gold_ml_features").select("id").limit(1).execute()
-        logger.info("ML Supabase: table gold_ml_features OK")
+        import psycopg2
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gold_ml_features (
+                id              BIGSERIAL PRIMARY KEY,
+                supabase_id     TEXT,
+                trade_time      TIMESTAMPTZ,
+                session         TEXT,
+                adx             FLOAT, atr_norm FLOAT,
+                rsi             FLOAT, macd_hist FLOAT,
+                ema9_ema21_gap  FLOAT, ema50_ema200_gap FLOAT,
+                stoch_k         FLOAT, williams_r FLOAT,
+                dxy_direction   INTEGER, score INTEGER,
+                direction_int   INTEGER, win_rate_20 FLOAT,
+                loss_streak     INTEGER, sl_mult FLOAT, tp_mult FLOAT,
+                outcome         INTEGER, pnl FLOAT,
+                created_at      TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gml_sid ON gold_ml_features(supabase_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_gml_out ON gold_ml_features(outcome)")
+        cur.close()
+        conn.close()
+        logger.info("ML Supabase: table gold_ml_features prête")
+    except ImportError:
+        logger.warning("ML: psycopg2 non installé — ML désactivé")
     except Exception as e:
-        logger.error(f"ML init: table gold_ml_features manquante — {e}")
-        sql_msg = (
-            "⚠️ *GOLD-E ML* — table `gold_ml_features` manquante dans Supabase\\.\n\n"
-            "Exécute ce SQL dans Supabase Dashboard > SQL Editor :\n\n"
-            "```sql\n"
-            "CREATE TABLE IF NOT EXISTS gold_ml_features (\n"
-            "  id BIGSERIAL PRIMARY KEY,\n"
-            "  supabase_id TEXT, trade_time TIMESTAMPTZ,\n"
-            "  session TEXT, adx FLOAT, atr_norm FLOAT,\n"
-            "  rsi FLOAT, macd_hist FLOAT,\n"
-            "  ema9_ema21_gap FLOAT, ema50_ema200_gap FLOAT,\n"
-            "  stoch_k FLOAT, williams_r FLOAT,\n"
-            "  dxy_direction INTEGER, score INTEGER,\n"
-            "  direction_int INTEGER, win_rate_20 FLOAT,\n"
-            "  loss_streak INTEGER, sl_mult FLOAT, tp_mult FLOAT,\n"
-            "  outcome INTEGER, pnl FLOAT,\n"
-            "  created_at TIMESTAMPTZ DEFAULT now()\n"
-            ");\n"
-            "CREATE INDEX IF NOT EXISTS idx_gml_sid ON gold_ml_features(supabase_id);\n"
-            "CREATE INDEX IF NOT EXISTS idx_gml_out ON gold_ml_features(outcome);\n"
-            "```"
-        )
-        if app and JOHN_ID:
-            try:
-                await app.bot.send_message(JOHN_ID, sql_msg, parse_mode="MarkdownV2")
-            except Exception:
-                pass
+        logger.error(f"init_ml_db: {e}")
 
 def log_trade_features(features: dict, supabase_id: str = ""):
     if not sb_client:
