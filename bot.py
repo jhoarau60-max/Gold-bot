@@ -197,9 +197,33 @@ def load_data_from_supabase() -> dict:
                     "supabase_id": row["id"],
                 })
 
+        # Historique trades fermés — nourrit adaptive_params + XGBoost au redémarrage
+        try:
+            h_res = sb_client.table("trade_history").select(
+                "symbol,direction,price_entry,price_exit,pnl,score,opened_at,closed_at"
+            ).eq("status", "closed").eq("bot", "gold").order(
+                "closed_at", desc=True
+            ).limit(100).execute()
+            for row in (h_res.data or []):
+                if row.get("pnl") is not None:
+                    base["closed_trades"].append({
+                        "ticker":      row["symbol"],
+                        "direction":   row["direction"],
+                        "entry_price": float(row["price_entry"] or 0),
+                        "exit_price":  float(row.get("price_exit") or 0),
+                        "pnl":         float(row["pnl"]),
+                        "score":       int(row.get("score") or 0),
+                        "entry_time":  str(row.get("opened_at") or ""),
+                        "exit_time":   str(row.get("closed_at") or ""),
+                    })
+            logger.info(f"{len(base['closed_trades'])} trades fermés restaurés depuis Supabase")
+        except Exception as e:
+            logger.warning(f"Restauration historique trades: {e}")
+
         logger.info(
             f"State Supabase chargé — capital: {base['capital']:.2f} EUR, "
-            f"{len(base['open_positions'])} positions ouvertes récupérées"
+            f"{len(base['open_positions'])} positions ouvertes, "
+            f"{len(base['closed_trades'])} trades historique"
         )
     except Exception as e:
         logger.error(f"load_data_from_supabase: {e}")
