@@ -20,6 +20,8 @@ import json
 import logging
 import io
 import re
+import sqlite3
+import pickle
 from datetime import datetime, timedelta
 
 import pytz
@@ -104,6 +106,13 @@ TICKER_TO_BOT = {
 RISK_PER_TRADE      = 0.01   # 1 % du capital par trade (Jesse Livermore : préserver le capital)
 MAX_DAILY_LOSS      = 0.05   # 5 % de perte max par jour (phase test)
 MAX_POSITION_HOURS  = 4      # timeout auto-close : scalping max 4h
+MAX_DAILY_TRADES    = 4      # GOLD-E : max 4 trades/jour (évite sur-trading)
+DRAWDOWN_ALERT      = 0.12   # 12% drawdown → risk réduit à 0.5%
+DRAWDOWN_PAUSE      = 0.20   # 20% drawdown → pause 48h obligatoire
+ML_MIN_TRADES       = 50     # XGBoost activé après 50 trades labelisés
+ML_DB_FILE          = "gold_ml.db"
+ML_MODEL_FILE       = "gold_ml_model.pkl"
+UTC                 = pytz.utc
 
 # Plages de prix valides — protection contre données aberrantes yfinance
 PRICE_BOUNDS = {
@@ -123,6 +132,7 @@ WEEKDAY_INSTRUMENTS = {
 def _default_state() -> dict:
     return {
         "capital":              CAPITAL_INITIAL,
+        "peak_capital":         CAPITAL_INITIAL,
         "open_positions":       [],
         "closed_trades":        [],
         "daily_pnl":            0.0,
@@ -135,6 +145,9 @@ def _default_state() -> dict:
         "instrument_losses":    {},
         "instrument_blacklist": {},
         "learned_params":       {},
+        "drawdown_pause_until": None,
+        "ml_auc":               0.0,
+        "ml_active":            False,
     }
 
 def load_data_from_supabase() -> dict:
@@ -230,9 +243,262 @@ def get_instruments() -> dict:
     return WEEKDAY_INSTRUMENTS
 
 def is_trading_session() -> bool:
-    """London (7h-17h) + NY (13h-22h) Paris. Or suit ces sessions."""
+    """London (7h-17h) + NY (13h-22h) Paris. Exits toujours surveillés."""
     h = datetime.now(TZ).hour
     return 7 <= h < 22
+
+def is_blackout_session() -> bool:
+    """Blackout 21h-00h UTC — gap asiatique, spreads larges, pas de nouveaux trades."""
+    h_utc = datetime.now(UTC).hour
+    return h_utc >= 21
+
+def get_current_session() -> str:
+    """Session active UTC pour logs et features ML."""
+    h = datetime.now(UTC).hour
+    if 0 <= h < 8:
+        return "Tokyo"
+    elif 8 <= h < 13:
+        return "London"
+    elif 13 <= h < 16:
+        return "London/NY"
+    elif 16 <= h < 21:
+        return "New York"
+    return "Blackout"
+
+def get_drawdown(data: dict) -> float:
+    """Drawdown courant = (peak - capital) / peak. Met à jour peak si nouveau sommet."""
+    peak    = data.get("peak_capital", CAPITAL_INITIAL)
+    capital = data["capital"]
+    if capital > peak:
+        data["peak_capital"] = capital
+        return 0.0
+    if peak <= 0:
+        return 0.0
+    return (peak - capital) / peak
+
+# ── DXY (Dollar Index — corrélation inverse XAU) ──────────────────────────────
+_dxy_cache: dict = {"direction": "FLAT", "fetched_at": None}
+
+def get_dxy_direction() -> str:
+    """UP si DXY monte (bearish XAU), DOWN si DXY baisse (bullish XAU). Cache 30min."""
+    global _dxy_cache
+    now = datetime.now(UTC)
+    if _dxy_cache["fetched_at"] and (now - _dxy_cache["fetched_at"]).seconds < 1800:
+        return _dxy_cache["direction"]
+    try:
+        df = yf.download("DX-Y.NYB", period="2d", interval="1h", progress=False, auto_adjust=True)
+        if df is None or len(df) < 4:
+            return "FLAT"
+        c   = df["Close"].squeeze()
+        pct = (float(c.iloc[-1]) - float(c.iloc[-4])) / float(c.iloc[-4])
+        if pct > 0.001:
+            direction = "UP"
+        elif pct < -0.001:
+            direction = "DOWN"
+        else:
+            direction = "FLAT"
+        _dxy_cache = {"direction": direction, "fetched_at": now}
+        return direction
+    except Exception as e:
+        logger.warning(f"DXY fetch: {e}")
+        return "FLAT"
+
+# ── MACRO CALENDAR (ForexFactory) ─────────────────────────────────────────────
+_macro_cache: dict = {"events": [], "fetched_at": None}
+
+def fetch_macro_calendar() -> list:
+    """ForexFactory calendar — high-impact events uniquement. Cache 4h."""
+    global _macro_cache
+    now = datetime.now(UTC)
+    if _macro_cache["fetched_at"] and (now - _macro_cache["fetched_at"]).seconds < 14400:
+        return _macro_cache["events"]
+    try:
+        import httpx
+        r = httpx.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", timeout=8)
+        if r.status_code == 200:
+            events = [e for e in r.json() if e.get("impact") == "High"]
+            _macro_cache = {"events": events, "fetched_at": now}
+            logger.info(f"Macro calendar: {len(events)} événements haute-impact")
+            return events
+    except Exception as e:
+        logger.warning(f"Macro calendar: {e}")
+    return _macro_cache.get("events", [])
+
+def is_macro_blackout() -> bool:
+    """True si annonce macro haute-impact dans les 30 prochaines minutes."""
+    try:
+        for e in fetch_macro_calendar():
+            dt_str = e.get("date", "")
+            if not dt_str:
+                continue
+            try:
+                ev_dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                diff  = (ev_dt.replace(tzinfo=UTC) - datetime.now(UTC)).total_seconds()
+                if -300 <= diff <= 1800:
+                    logger.info(f"Macro blackout: {e.get('title','?')} dans {diff:.0f}s")
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+# ── ML INFRASTRUCTURE (XGBoost) ───────────────────────────────────────────────
+_ml_model = None
+_ml_auc   = 0.0
+
+FEATURE_COLS = [
+    "adx", "atr_norm", "rsi", "macd_hist", "ema9_ema21_gap",
+    "ema50_ema200_gap", "stoch_k", "williams_r", "dxy_direction",
+    "score", "direction_int", "win_rate_20", "loss_streak", "sl_mult", "tp_mult",
+]
+
+def init_ml_db():
+    try:
+        conn = sqlite3.connect(ML_DB_FILE)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_features (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                supabase_id      TEXT,
+                trade_time       TEXT,
+                session          TEXT,
+                adx              REAL, atr_norm REAL, rsi REAL, macd_hist REAL,
+                ema9_ema21_gap   REAL, ema50_ema200_gap REAL,
+                stoch_k          REAL, williams_r REAL,
+                dxy_direction    INTEGER,
+                score            INTEGER, direction_int INTEGER,
+                win_rate_20      REAL, loss_streak INTEGER,
+                sl_mult          REAL, tp_mult REAL,
+                outcome          INTEGER, pnl REAL
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"init_ml_db: {e}")
+
+def log_trade_features(features: dict, supabase_id: str = ""):
+    try:
+        conn = sqlite3.connect(ML_DB_FILE)
+        conn.execute(
+            "INSERT INTO trade_features "
+            "(supabase_id,trade_time,session,adx,atr_norm,rsi,macd_hist,"
+            "ema9_ema21_gap,ema50_ema200_gap,stoch_k,williams_r,dxy_direction,"
+            "score,direction_int,win_rate_20,loss_streak,sl_mult,tp_mult) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                supabase_id,
+                features.get("trade_time", ""),
+                features.get("session", ""),
+                features.get("adx", 0), features.get("atr_norm", 1),
+                features.get("rsi", 50), features.get("macd_hist", 0),
+                features.get("ema9_ema21_gap", 0), features.get("ema50_ema200_gap", 0),
+                features.get("stoch_k", 50), features.get("williams_r", -50),
+                features.get("dxy_direction", 0),
+                features.get("score", 0), features.get("direction_int", 0),
+                features.get("win_rate_20", 50), features.get("loss_streak", 0),
+                features.get("sl_mult", 1.5), features.get("tp_mult", 3.75),
+            )
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"log_trade_features: {e}")
+
+def update_trade_outcome(supabase_id: str, outcome: int, pnl: float):
+    if not supabase_id:
+        return
+    try:
+        conn = sqlite3.connect(ML_DB_FILE)
+        conn.execute(
+            "UPDATE trade_features SET outcome=?, pnl=? WHERE supabase_id=? AND outcome IS NULL",
+            (outcome, pnl, supabase_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"update_trade_outcome: {e}")
+
+def collect_features(df: pd.DataFrame, data: dict, direction: str, dxy_dir: str) -> dict:
+    try:
+        last    = df.iloc[-1]
+        recent  = data.get("closed_trades", [])[-20:]
+        wr_20   = (sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent) * 100) if recent else 50.0
+        atr_avg = float(df["ATR"].tail(20).mean())
+        atr_now = float(last["ATR"])
+        atr_norm = atr_now / atr_avg if atr_avg > 0 else 1.0
+        dxy_map = {"UP": 1, "FLAT": 0, "DOWN": -1}
+        lp = data.get("learned_params", {})
+        return {
+            "trade_time":       datetime.now(TZ).isoformat(),
+            "session":          get_current_session(),
+            "adx":              float(last["ADX"]),
+            "atr_norm":         atr_norm,
+            "rsi":              float(last["RSI"]),
+            "macd_hist":        float(last["MACD_hist"]),
+            "ema9_ema21_gap":   (float(last["EMA9"]) - float(last["EMA21"])) / max(float(last["EMA21"]), 1) * 100,
+            "ema50_ema200_gap": (float(last["EMA50"]) - float(last["EMA200"])) / max(float(last["EMA200"]), 1) * 100,
+            "stoch_k":          float(last["STOCH_K"]),
+            "williams_r":       float(last["WILLIAMS_R"]),
+            "dxy_direction":    dxy_map.get(dxy_dir, 0),
+            "score":            0,
+            "direction_int":    1 if direction == "BUY" else -1,
+            "win_rate_20":      wr_20,
+            "loss_streak":      data.get("loss_streak", 0),
+            "sl_mult":          lp.get("sl_mult", 1.5),
+            "tp_mult":          lp.get("tp_mult", 3.75),
+        }
+    except Exception as e:
+        logger.error(f"collect_features: {e}")
+        return {}
+
+def train_and_save_ml() -> tuple[object | None, float]:
+    global _ml_model, _ml_auc
+    try:
+        import xgboost as xgb
+        from sklearn.metrics import roc_auc_score
+        conn = sqlite3.connect(ML_DB_FILE)
+        df_ml = pd.read_sql("SELECT * FROM trade_features WHERE outcome IS NOT NULL", conn)
+        conn.close()
+        if len(df_ml) < ML_MIN_TRADES:
+            logger.info(f"ML: {len(df_ml)}/{ML_MIN_TRADES} trades — entraînement reporté")
+            return None, 0.0
+        X = df_ml[FEATURE_COLS].values.astype(float)
+        y = df_ml["outcome"].values.astype(int)
+        split = int(len(X) * 0.8)
+        X_tr, X_val = X[:split], X[split:]
+        y_tr, y_val = y[:split], y[split:]
+        if len(set(y_val)) < 2:
+            return None, 0.0
+        model = xgb.XGBClassifier(
+            n_estimators=100, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, eval_metric="logloss", verbosity=0
+        )
+        model.fit(X_tr, y_tr)
+        auc = roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+        with open(ML_MODEL_FILE, "wb") as f:
+            pickle.dump(model, f)
+        _ml_model = model
+        _ml_auc   = auc
+        logger.info(f"ML entraîné — AUC {auc:.3f} sur {len(df_ml)} trades")
+        return model, auc
+    except ImportError:
+        logger.warning("XGBoost non installé — ML désactivé")
+        return None, 0.0
+    except Exception as e:
+        logger.error(f"train_and_save_ml: {e}")
+        return None, 0.0
+
+def predict_ml_proba(features: dict) -> float:
+    """Probabilité de succès ML. Retourne -1 si modèle non actif."""
+    global _ml_model, _ml_auc
+    if _ml_model is None or _ml_auc < 0.55:
+        return -1.0
+    try:
+        X = [[features.get(c, 0) for c in FEATURE_COLS]]
+        return float(_ml_model.predict_proba(X)[0][1])
+    except Exception:
+        return -1.0
 
 def save_learned_params(params: dict):
     """Persiste les params Gemini dans wiki_knowledge (survie redéploiement)."""
@@ -828,6 +1094,18 @@ def open_trade(data: dict, ticker: str, direction: str,
     if data["daily_pnl"] <= -(data["capital"] * MAX_DAILY_LOSS):
         logger.info("Limite perte journalière atteinte")
         return None
+
+    # GOLD-E : max 4 trades/jour
+    if data.get("daily_trades", 0) >= MAX_DAILY_TRADES:
+        logger.info(f"Refus {ticker} — max {MAX_DAILY_TRADES} trades/jour atteint ({data['daily_trades']})")
+        return None
+
+    # GOLD-E : drawdown control
+    dd = get_drawdown(data)
+    if dd >= DRAWDOWN_PAUSE:
+        logger.warning(f"Drawdown {dd:.1%} >= {DRAWDOWN_PAUSE:.0%} — pause obligatoire")
+        return None
+
     for p in data["open_positions"]:
         if p["ticker"] == ticker:
             return None
@@ -835,6 +1113,11 @@ def open_trade(data: dict, ticker: str, direction: str,
     sl_mult = params["sl_mult"]        if params else 1.5
     tp_mult = params["tp_mult"]        if params else 3.75
     risk    = params["risk_per_trade"] if params else RISK_PER_TRADE
+
+    # GOLD-E : drawdown 12% → sizing réduit à 0.5%
+    if dd >= DRAWDOWN_ALERT:
+        risk = min(risk, 0.005)
+        logger.info(f"Drawdown {dd:.1%} — risk réduit à {risk:.1%}")
     sl_dist = atr * sl_mult
     tp_dist = atr * tp_mult
 
@@ -1769,18 +2052,23 @@ async def post_mortem_analysis(app: Application, pos: dict):
         model = genai.GenerativeModel("gemini-2.5-flash")
         pnl = pos.get("pnl", 0)
 
-        prompt = f"""Tu es un coach de trading expert. Analyse ce trade perdant en 3 points concis (Markdown).
+        prompt = f"""Tu es GOLD-E, système de trading XAU/USD auto-évolutif. Analyse ce trade perdant selon 6 axes précis.
 
 TRADE :
-- Instrument : {pos.get('ticker')} | Direction : {pos.get('direction')}
-- Entrée : {pos.get('entry_price')} → Sortie : {pos.get('exit_price', '?')}
-- SL : {pos.get('sl')} | TP : {pos.get('tp')}
-- P&L : {pnl:+.2f} EUR | Score signal : {pos.get('score', '?')}/7
-- Raison sortie : {pos.get('exit_reason', 'Stop Loss')}
+- Direction : {pos.get('direction')} | Entrée : {pos.get('entry_price')} → Sortie : {pos.get('exit_price', '?')}
+- SL : {pos.get('sl')} | TP : {pos.get('tp')} | Score : {pos.get('score', '?')}/7
+- P&L : {pnl:+.2f} EUR | Session : {pos.get('session', '?')} | Raison : {pos.get('exit_reason', 'SL')}
 
-1. **Erreur principale** : Qu'est-ce qui a mal tourné ?
-2. **Signal d'alerte manqué** : Quel indicateur aurait dû alerter ?
-3. **Leçon** : Que faire différemment ?"""
+POST-MORTEM (Markdown, 1 ligne par axe, concis et factuel) :
+
+1. **Erreur de setup** : Pattern valide ? Volume suffisant ? Signal trop faible ?
+2. **Erreur de timing** : Entrée trop tôt/tard ? Quel indice manquait ?
+3. **Erreur macro** : DXY en sens inverse ? Annonce économique ignorée ?
+4. **Erreur ML/signal** : Indicateur dominant qui aurait dû bloquer ce trade ?
+5. **Erreur risk management** : SL trop serré ? Sizing trop agressif ? Drawdown ignoré ?
+6. **Classification** : SYSTÉMATIQUE (va se reproduire) ou CONJONCTUREL (one-off) ?
+
+Termine par : **Leçon GOLD-E** : "La prochaine fois, [action corrective concrète en 1 phrase]." """
 
         resp   = model.generate_content(prompt)
         lesson = resp.text.strip()
@@ -2023,7 +2311,12 @@ Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {t
 # ── BOUCLE DE TRADING ──────────────────────────────────────────────────────────
 async def trading_loop(app: Application):
     logger.info("Boucle de trading démarrée — vérification toutes les 5 min")
-    cycle = 0
+    init_ml_db()
+    global _ml_model, _ml_auc
+    _ml_model = load_ml_model() if os.path.exists(ML_MODEL_FILE) else None
+    cycle         = 0
+    last_ml_train = 0  # cycle du dernier entraînement ML
+
     while True:
         try:
             data        = load_data()
@@ -2031,11 +2324,90 @@ async def trading_loop(app: Application):
             cycle += 1
             hourly_lines = []
 
-            # Filtre session : or actif London/NY uniquement (7h-22h Paris)
+            # Exits toujours surveillés — même hors session (évite positions bloquées overnight)
+            for ticker, info in instruments.items():
+                df_exit = await fetch_async(ticker)
+                if df_exit is None or len(df_exit) < 10:
+                    continue
+                price_exit = float(df_exit["Close"].squeeze().iloc[-1])
+                exits = check_exits(data, ticker, price_exit)
+                data  = load_data()
+                for pos, reason in exits:
+                    pnl_e   = pos.get("pnl", 0)
+                    outcome = 1 if pnl_e > 0 else 0
+                    update_trade_outcome(pos.get("supabase_id", ""), outcome, pnl_e)
+                    em  = "✅" if pnl_e > 0 else "❌"
+                    rst = len(data.get("open_positions", []))
+                    rst_txt = "Aucun trade en cours" if rst == 0 else f"{rst} trade(s) en cours"
+                    msg = (
+                        f"{em} *Trade fermé — {info['name']}*\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Direction : {pos['direction']} | Score : `{pos.get('score','?')}/7`\n"
+                        f"Entrée : `{pos['entry_price']:.4f}` → Sortie : `{price_exit:.4f}`\n"
+                        f"Raison : {reason}\n"
+                        f"P&L : `{pnl_e:+.2f} €` | Capital : `{data['capital']:.2f} €`\n"
+                        f"📊 {rst_txt}"
+                    )
+                    try:
+                        await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
+                    except Exception:
+                        pass
+                    if pnl_e < 0:
+                        asyncio.create_task(post_mortem_analysis(app, pos))
+
+            # Filtre session : pas de NOUVEAUX trades hors London/NY
             if not is_trading_session():
-                logger.info("Hors session — reprise à 7h Paris")
+                logger.info("Hors session — exits surveillés, pas de nouveaux trades")
                 await asyncio.sleep(30 * 60)
                 continue
+
+            # Blackout 21h-00h UTC — gap asiatique
+            if is_blackout_session():
+                logger.info("Blackout 21h-00h UTC — aucun nouveau trade")
+                await asyncio.sleep(30 * 60)
+                continue
+
+            # Drawdown pause
+            dd = get_drawdown(data)
+            pause_until = data.get("drawdown_pause_until")
+            if pause_until and datetime.now(TZ).isoformat() < pause_until:
+                logger.warning(f"Drawdown pause active jusqu'à {pause_until}")
+                await asyncio.sleep(30 * 60)
+                continue
+            if dd >= DRAWDOWN_PAUSE:
+                pause_dt = (datetime.now(TZ) + timedelta(hours=48)).isoformat()
+                data["drawdown_pause_until"] = pause_dt
+                save_data(data)
+                try:
+                    await app.bot.send_message(
+                        JOHN_ID,
+                        f"🛑 *GOLD-E — Pause 48h*\n\nDrawdown : `{dd:.1%}` ≥ seuil `{DRAWDOWN_PAUSE:.0%}`\n"
+                        f"Reprise : `{pause_dt[:16]}`\nCapital : `{data['capital']:.2f} €`",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(30 * 60)
+                continue
+
+            # Macro blackout
+            if is_macro_blackout():
+                logger.info("Macro blackout — annonce haute-impact imminente")
+                await asyncio.sleep(10 * 60)
+                continue
+
+            # DXY direction (cache 30min)
+            dxy_dir = get_dxy_direction()
+
+            # Réentraîner ML tous les 50 cycles (~4h) si nouveau modèle possible
+            if cycle - last_ml_train >= 50:
+                _ml_model, _ml_auc = train_and_save_ml()
+                last_ml_train = cycle
+                if _ml_auc >= 0.55:
+                    data["ml_active"] = True
+                    data["ml_auc"]    = _ml_auc
+                    save_data(data)
+                    logger.info(f"ML activé — AUC {_ml_auc:.3f}")
 
             # Nettoyer blacklist expirée
             now_ts = datetime.now(TZ).timestamp()
@@ -2059,7 +2431,6 @@ async def trading_loop(app: Application):
             logger.info(f"Mode adaptatif : {params['mode']} — seuil {params['threshold']}/7")
 
             for ticker, info in instruments.items():
-                # Skip instrument blacklisté
                 if ticker in data.get("instrument_blacklist", {}):
                     logger.info(f"Skip {ticker} — blacklisté")
                     continue
@@ -2071,47 +2442,24 @@ async def trading_loop(app: Application):
                 df    = compute_indicators(df)
                 price = float(df["Close"].squeeze().iloc[-1])
                 atr   = float(df["ATR"].iloc[-1])
-
                 if pd.isna(atr) or atr <= 0:
                     continue
 
-                # Vérifier sorties
-                exits = check_exits(data, ticker, price)
-                data  = load_data()
-                for pos, reason in exits:
-                    pnl_e = pos.get("pnl", 0)
-                    em = "✅" if pnl_e > 0 else "❌"
-                    restants = len(data.get("open_positions", []))
-                    restants_txt = f"Aucun trade en cours" if restants == 0 else f"{restants} trade(s) encore en cours"
-                    msg = (
-                        f"{em} *Trade fermé — {info['name']}*\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"Direction : {pos['direction']} | Confiance : `{pos.get('score','?')}/7`\n"
-                        f"Entrée : `{pos['entry_price']:.4f}` → Sortie : `{price:.4f}`\n"
-                        f"Raison : {reason}\n"
-                        f"P&L : `{pnl_e:+.2f} €` | Capital : `{data['capital']:.2f} €`\n"
-                        f"📊 {restants_txt}"
-                    )
-                    try:
-                        await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
-                    except Exception:
-                        pass
-                    if pnl_e < 0:
-                        asyncio.create_task(post_mortem_analysis(app, pos))
-
-                # Pattern chandeliers
-                pattern = detect_candlestick_pattern(df)
-
-                # Signal multi-critères
+                pattern              = detect_candlestick_pattern(df)
                 direction, score, reasons = compute_signal_score(df)
 
-                # Résumé horaire (toutes les 4 cycles = 1h)
                 rsi_val = float(df["RSI"].iloc[-1])
                 adx_val = float(df["ADX"].iloc[-1])
-                arrow = "📈" if direction == "BUY" else ("📉" if direction == "SELL" else "⏸")
-                hourly_lines.append(
-                    f"{arrow} *{info['name']}* — Score `{score}/7` | Prix `{price:.2f}` | RSI `{rsi_val:.1f}` | ADX `{adx_val:.1f}`"
-                )
+                arrow   = "📈" if direction == "BUY" else ("📉" if direction == "SELL" else "⏸")
+
+                # DXY confirmation — XAU/USD corrélation inverse
+                dxy_label = f"DXY {dxy_dir}"
+                if direction == "BUY" and dxy_dir == "UP":
+                    logger.info(f"Skip {ticker} BUY — DXY hausse (bearish XAU)")
+                    direction = None
+                elif direction == "SELL" and dxy_dir == "DOWN":
+                    logger.info(f"Skip {ticker} SELL — DXY baisse (bullish XAU)")
+                    direction = None
 
                 if direction:
                     # 1H multi-timeframe : signal doit être aligné avec tendance macro
@@ -2121,22 +2469,50 @@ async def trading_loop(app: Application):
                         logger.info(f"Skip {ticker} — signal {direction} contre tendance 1H ({trend_1h})")
                         direction = None
 
+                # ML prediction (si modèle actif — AUC >= 0.55)
+                ml_proba = -1.0
+                ml_label = ""
                 if direction:
+                    feats = collect_features(df, data, direction, dxy_dir)
+                    feats["score"] = score
+                    ml_proba = predict_ml_proba(feats)
+                    if ml_proba >= 0:
+                        ml_label = f" | ML `{ml_proba:.0%}`"
+                        if ml_proba < 0.50:
+                            logger.info(f"Skip {ticker} — ML proba {ml_proba:.2f} < 0.50")
+                            direction = None
+                        elif ml_proba < 0.55:
+                            # Sizing réduit géré dans open_trade via risk override
+                            logger.info(f"{ticker} ML proba {ml_proba:.2f} → sizing 0.5%")
+                            if params:
+                                params = dict(params)
+                                params["risk_per_trade"] = min(params.get("risk_per_trade", 0.01), 0.005)
+
+                hourly_lines.append(
+                    f"{arrow} *{info['name']}* — Score `{score}/7` | `{price:.2f}` | RSI `{rsi_val:.1f}` | ADX `{adx_val:.1f}` | {dxy_label}{ml_label}"
+                )
+
+                if direction:
+                    feats_final = collect_features(df, data, direction, dxy_dir)
+                    feats_final["score"] = score
                     pos = open_trade(data, ticker, direction, price, atr, score, params=params)
                     data = load_data()
                     if pos:
+                        log_trade_features(feats_final, pos.get("supabase_id", ""))
+                        pos["session"] = get_current_session()
                         em  = "📈" if direction == "BUY" else "📉"
                         pat = f"\n📊 Pattern : `{pattern}`" if pattern else ""
+                        session_str = get_current_session()
+                        ml_str = f"\n🤖 ML : `{ml_proba:.0%}`" if ml_proba >= 0 else ""
                         msg = (
                             f"{em} *TRADE EN COURS — {info['name']}*\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Timeframe : `5 minutes` | Durée estimée : `15min — 2h`\n"
-                            f"Direction : *{direction}* | Confiance : `{score}/7`\n"
+                            f"Session : `{session_str}` | DXY : `{dxy_dir}`\n"
+                            f"Direction : *{direction}* | Score : `{score}/7`\n"
                             f"Prix d'entrée : `{price:.4f}`\n"
                             f"Stop-Loss : `{pos['sl']:.4f}`\n"
-                            f"Take-Profit : `{pos['tp']:.4f}`{pat}\n\n"
-                            f"*Signaux déclencheurs :*\n" +
-                            "\n".join(reasons[:4])
+                            f"Take-Profit : `{pos['tp']:.4f}`{pat}{ml_str}\n\n"
+                            f"*Signaux :*\n" + "\n".join(reasons[:4])
                         )
                         try:
                             await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
@@ -2145,8 +2521,10 @@ async def trading_loop(app: Application):
 
             # Résumé toutes les heures (cycle 12 = 12×5min)
             if cycle % 12 == 0 and hourly_lines:
-                now_str = datetime.now(TZ).strftime("%H:%M")
-                summary = f"🕐 *Surveillance {now_str}*\n\n" + "\n".join(hourly_lines)
+                now_str  = datetime.now(TZ).strftime("%H:%M")
+                sess_str = get_current_session()
+                dd_str   = f"{get_drawdown(data):.1%}"
+                summary  = f"🕐 *Surveillance {now_str} — {sess_str} | DD: {dd_str}*\n\n" + "\n".join(hourly_lines)
                 try:
                     await app.bot.send_message(JOHN_ID, summary, parse_mode="Markdown")
                 except Exception:
