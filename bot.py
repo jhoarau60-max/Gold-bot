@@ -2222,6 +2222,9 @@ async def weekly_audit(app: Application, data: dict):
     pct       = (data["capital"] - CAPITAL_INITIAL) / CAPITAL_INITIAL * 100
     best      = max(week_trades, key=lambda x: x.get("pnl", 0), default=None)
     worst     = min(week_trades, key=lambda x: x.get("pnl", 0), default=None)
+    peak      = data.get("peak_capital", CAPITAL_INITIAL)
+    dd_pct    = (peak - data["capital"]) / peak * 100 if peak > 0 else 0.0
+    dxy_dir   = get_dxy_direction()
 
     analysis = "Analyse indisponible."
     if GEMINI_API_KEY:
@@ -2233,9 +2236,10 @@ async def weekly_audit(app: Application, data: dict):
                 for t in week_trades[-20:]
             ]) or "Aucun trade."
 
-            prompt = f"""Analyse la semaine de trading (Markdown, 4 points concis).
+            prompt = f"""Analyse la semaine de trading GOLD-E (Markdown, 5 points concis).
 
 STATS : {len(week_trades)} trades | {wr:.1f}% WR | P&L semaine {total_pnl:+.2f} EUR | Capital {data['capital']:.2f} EUR ({pct:+.2f}%)
+Drawdown max semaine : {dd_pct:.1f}% | DXY fin de semaine : {dxy_dir}
 Meilleur : {f"{best['ticker']} {best['direction']} +{best['pnl']:.2f}€" if best else "N/A"}
 Pire : {f"{worst['ticker']} {worst['direction']} {worst['pnl']:+.2f}€" if worst else "N/A"}
 
@@ -2244,8 +2248,9 @@ TRADES :
 
 1. **Performance globale** : Bonne/mauvaise semaine ?
 2. **Patterns d'erreurs** : Quelles erreurs reviennent ?
-3. **Forces identifiées** : Ce qui fonctionne
-4. **Actions semaine prochaine** : 2-3 ajustements concrets"""
+3. **Impact DXY** : Le Dollar a-t-il influencé les résultats ? (DXY {dxy_dir})
+4. **Forces identifiées** : Ce qui fonctionne
+5. **Actions semaine prochaine** : 2-3 ajustements concrets"""
 
             resp     = model.generate_content(prompt)
             analysis = resp.text.strip()
@@ -2278,7 +2283,8 @@ Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {t
             await app.bot.send_message(
                 JOHN_ID,
                 f"📋 *Audit Hebdomadaire — Gold Bot*\n📅 {cutoff} → {today}\n\n"
-                f"📊 {len(week_trades)} trades | {wr:.1f}% WR | `{total_pnl:+.2f} EUR`\n\n"
+                f"📊 {len(week_trades)} trades | {wr:.1f}% WR | `{total_pnl:+.2f} EUR`\n"
+                f"📉 Drawdown semaine : `{dd_pct:.1f}%` | DXY : `{dxy_dir}`\n\n"
                 f"{analysis[:700]}\n\n💾 _Sauvegardé dans le wiki_",
                 parse_mode="Markdown"
             )
