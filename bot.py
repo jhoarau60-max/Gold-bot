@@ -1166,13 +1166,16 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
             continue
 
         if pos["direction"] == "BUY":
-            pnl    = (price - pos["entry_price"]) * pos["qty"]
             hit_sl = price <= pos["sl"]
             hit_tp = price >= pos["tp"]
+            # Fermeture au prix SL/TP réel (évite slippage gap)
+            exit_price = pos["sl"] if hit_sl else (pos["tp"] if hit_tp else price)
+            pnl = (exit_price - pos["entry_price"]) * pos["qty"]
         else:
-            pnl    = (pos["entry_price"] - price) * pos["qty"]
             hit_sl = price >= pos["sl"]
             hit_tp = price <= pos["tp"]
+            exit_price = pos["sl"] if hit_sl else (pos["tp"] if hit_tp else price)
+            pnl = (pos["entry_price"] - exit_price) * pos["qty"]
 
         pos["pnl"] = round(pnl, 2)
 
@@ -1189,7 +1192,7 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
 
         if hit_sl or hit_tp or timeout_hit:
             reason = "✅ Take Profit" if hit_tp else ("⏰ Timeout" if timeout_hit else "🛑 Stop Loss")
-            pos["exit_price"]  = round(price, 5)
+            pos["exit_price"]  = round(exit_price if (hit_sl or hit_tp) else price, 5)
             pos["exit_time"]   = datetime.now(TZ).isoformat()
             pos["exit_reason"] = reason
             data["closed_trades"].append(pos)
