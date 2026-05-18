@@ -20,8 +20,6 @@ import json
 import logging
 import io
 import re
-import sqlite3
-import pickle
 from datetime import datetime, timedelta
 
 import pytz
@@ -110,8 +108,6 @@ MAX_DAILY_TRADES    = 4      # GOLD-E : max 4 trades/jour (évite sur-trading)
 DRAWDOWN_ALERT      = 0.12   # 12% drawdown → risk réduit à 0.5%
 DRAWDOWN_PAUSE      = 0.20   # 20% drawdown → pause 48h obligatoire
 ML_MIN_TRADES       = 50     # XGBoost activé après 50 trades labelisés
-ML_DB_FILE          = "gold_ml.db"
-ML_MODEL_FILE       = "gold_ml_model.pkl"
 UTC                 = pytz.utc
 
 # Plages de prix valides — protection contre données aberrantes yfinance
@@ -353,69 +349,77 @@ FEATURE_COLS = [
     "score", "direction_int", "win_rate_20", "loss_streak", "sl_mult", "tp_mult",
 ]
 
-def init_ml_db():
+async def init_ml_db(app=None):
+    """Vérifie que la table gold_ml_features existe dans Supabase."""
+    if not sb_client:
+        logger.warning("ML Supabase: sb_client non dispo — ML désactivé")
+        return
     try:
-        conn = sqlite3.connect(ML_DB_FILE)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trade_features (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                supabase_id      TEXT,
-                trade_time       TEXT,
-                session          TEXT,
-                adx              REAL, atr_norm REAL, rsi REAL, macd_hist REAL,
-                ema9_ema21_gap   REAL, ema50_ema200_gap REAL,
-                stoch_k          REAL, williams_r REAL,
-                dxy_direction    INTEGER,
-                score            INTEGER, direction_int INTEGER,
-                win_rate_20      REAL, loss_streak INTEGER,
-                sl_mult          REAL, tp_mult REAL,
-                outcome          INTEGER, pnl REAL
-            )
-        """)
-        conn.commit()
-        conn.close()
+        sb_client.table("gold_ml_features").select("id").limit(1).execute()
+        logger.info("ML Supabase: table gold_ml_features OK")
     except Exception as e:
-        logger.error(f"init_ml_db: {e}")
+        logger.error(f"ML init: table gold_ml_features manquante — {e}")
+        sql_msg = (
+            "⚠️ *GOLD-E ML* — table `gold_ml_features` manquante dans Supabase\\.\n\n"
+            "Exécute ce SQL dans Supabase Dashboard > SQL Editor :\n\n"
+            "```sql\n"
+            "CREATE TABLE IF NOT EXISTS gold_ml_features (\n"
+            "  id BIGSERIAL PRIMARY KEY,\n"
+            "  supabase_id TEXT, trade_time TIMESTAMPTZ,\n"
+            "  session TEXT, adx FLOAT, atr_norm FLOAT,\n"
+            "  rsi FLOAT, macd_hist FLOAT,\n"
+            "  ema9_ema21_gap FLOAT, ema50_ema200_gap FLOAT,\n"
+            "  stoch_k FLOAT, williams_r FLOAT,\n"
+            "  dxy_direction INTEGER, score INTEGER,\n"
+            "  direction_int INTEGER, win_rate_20 FLOAT,\n"
+            "  loss_streak INTEGER, sl_mult FLOAT, tp_mult FLOAT,\n"
+            "  outcome INTEGER, pnl FLOAT,\n"
+            "  created_at TIMESTAMPTZ DEFAULT now()\n"
+            ");\n"
+            "CREATE INDEX IF NOT EXISTS idx_gml_sid ON gold_ml_features(supabase_id);\n"
+            "CREATE INDEX IF NOT EXISTS idx_gml_out ON gold_ml_features(outcome);\n"
+            "```"
+        )
+        if app and JOHN_ID:
+            try:
+                await app.bot.send_message(JOHN_ID, sql_msg, parse_mode="MarkdownV2")
+            except Exception:
+                pass
 
 def log_trade_features(features: dict, supabase_id: str = ""):
+    if not sb_client:
+        return
     try:
-        conn = sqlite3.connect(ML_DB_FILE)
-        conn.execute(
-            "INSERT INTO trade_features "
-            "(supabase_id,trade_time,session,adx,atr_norm,rsi,macd_hist,"
-            "ema9_ema21_gap,ema50_ema200_gap,stoch_k,williams_r,dxy_direction,"
-            "score,direction_int,win_rate_20,loss_streak,sl_mult,tp_mult) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                supabase_id,
-                features.get("trade_time", ""),
-                features.get("session", ""),
-                features.get("adx", 0), features.get("atr_norm", 1),
-                features.get("rsi", 50), features.get("macd_hist", 0),
-                features.get("ema9_ema21_gap", 0), features.get("ema50_ema200_gap", 0),
-                features.get("stoch_k", 50), features.get("williams_r", -50),
-                features.get("dxy_direction", 0),
-                features.get("score", 0), features.get("direction_int", 0),
-                features.get("win_rate_20", 50), features.get("loss_streak", 0),
-                features.get("sl_mult", 1.5), features.get("tp_mult", 3.75),
-            )
-        )
-        conn.commit()
-        conn.close()
+        sb_client.table("gold_ml_features").insert({
+            "supabase_id":      supabase_id,
+            "trade_time":       features.get("trade_time"),
+            "session":          features.get("session", ""),
+            "adx":              features.get("adx", 0),
+            "atr_norm":         features.get("atr_norm", 1),
+            "rsi":              features.get("rsi", 50),
+            "macd_hist":        features.get("macd_hist", 0),
+            "ema9_ema21_gap":   features.get("ema9_ema21_gap", 0),
+            "ema50_ema200_gap": features.get("ema50_ema200_gap", 0),
+            "stoch_k":          features.get("stoch_k", 50),
+            "williams_r":       features.get("williams_r", -50),
+            "dxy_direction":    features.get("dxy_direction", 0),
+            "score":            features.get("score", 0),
+            "direction_int":    features.get("direction_int", 0),
+            "win_rate_20":      features.get("win_rate_20", 50),
+            "loss_streak":      features.get("loss_streak", 0),
+            "sl_mult":          features.get("sl_mult", 1.5),
+            "tp_mult":          features.get("tp_mult", 3.75),
+        }).execute()
     except Exception as e:
         logger.error(f"log_trade_features: {e}")
 
 def update_trade_outcome(supabase_id: str, outcome: int, pnl: float):
-    if not supabase_id:
+    if not sb_client or not supabase_id:
         return
     try:
-        conn = sqlite3.connect(ML_DB_FILE)
-        conn.execute(
-            "UPDATE trade_features SET outcome=?, pnl=? WHERE supabase_id=? AND outcome IS NULL",
-            (outcome, pnl, supabase_id)
-        )
-        conn.commit()
-        conn.close()
+        sb_client.table("gold_ml_features").update({
+            "outcome": outcome, "pnl": pnl
+        }).eq("supabase_id", supabase_id).is_("outcome", "null").execute()
     except Exception as e:
         logger.error(f"update_trade_outcome: {e}")
 
@@ -452,14 +456,18 @@ def collect_features(df: pd.DataFrame, data: dict, direction: str, dxy_dir: str)
         logger.error(f"collect_features: {e}")
         return {}
 
-def train_and_save_ml() -> tuple[object | None, float]:
+def train_and_save_ml() -> tuple:
     global _ml_model, _ml_auc
+    if not sb_client:
+        return None, 0.0
     try:
         import xgboost as xgb
         from sklearn.metrics import roc_auc_score
-        conn = sqlite3.connect(ML_DB_FILE)
-        df_ml = pd.read_sql("SELECT * FROM trade_features WHERE outcome IS NOT NULL", conn)
-        conn.close()
+        resp = sb_client.table("gold_ml_features").select("*").not_.is_("outcome", "null").execute()
+        if not resp.data:
+            logger.info(f"ML: 0/{ML_MIN_TRADES} trades — entraînement reporté")
+            return None, 0.0
+        df_ml = pd.DataFrame(resp.data)
         if len(df_ml) < ML_MIN_TRADES:
             logger.info(f"ML: {len(df_ml)}/{ML_MIN_TRADES} trades — entraînement reporté")
             return None, 0.0
@@ -476,11 +484,9 @@ def train_and_save_ml() -> tuple[object | None, float]:
         )
         model.fit(X_tr, y_tr)
         auc = roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
-        with open(ML_MODEL_FILE, "wb") as f:
-            pickle.dump(model, f)
         _ml_model = model
         _ml_auc   = auc
-        logger.info(f"ML entraîné — AUC {auc:.3f} sur {len(df_ml)} trades")
+        logger.info(f"ML entraîné — AUC {auc:.3f} sur {len(df_ml)} trades (Supabase)")
         return model, auc
     except ImportError:
         logger.warning("XGBoost non installé — ML désactivé")
@@ -2311,9 +2317,9 @@ Audit semaine {cutoff} → {today} : {len(week_trades)} trades, {wr:.1f}% WR, {t
 # ── BOUCLE DE TRADING ──────────────────────────────────────────────────────────
 async def trading_loop(app: Application):
     logger.info("Boucle de trading démarrée — vérification toutes les 5 min")
-    init_ml_db()
+    await init_ml_db(app)
     global _ml_model, _ml_auc
-    _ml_model = load_ml_model() if os.path.exists(ML_MODEL_FILE) else None
+    _ml_model = None  # ML entraîné depuis Supabase après 50 trades
     cycle         = 0
     last_ml_train = 0  # cycle du dernier entraînement ML
 
