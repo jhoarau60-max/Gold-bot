@@ -893,15 +893,26 @@ def detect_candlestick_pattern(df: pd.DataFrame) -> str | None:
 
 # ── NIVEAUX FIBONACCI (outil clé de Paul Tudor Jones, Gann) ────────────────────
 def fibonacci_levels(df: pd.DataFrame) -> dict:
-    c = df["Close"].squeeze()
     period = min(50, len(df))
-    recent = c.tail(period)
-    high = float(recent.max())
-    low  = float(recent.min())
+    hi_series = df["High"].squeeze().tail(period)
+    lo_series = df["Low"].squeeze().tail(period)
+    high = float(hi_series.max())
+    low  = float(lo_series.min())
     diff = high - low
+    # Timestamp des bougies swing (pour positionnement exact sur le graphique)
+    hi_pos = int(hi_series.values.argmax())
+    lo_pos = int(lo_series.values.argmin())
+    try:
+        hi_time = str(hi_series.index[hi_pos])
+        lo_time = str(lo_series.index[lo_pos])
+    except Exception:
+        hi_time = None
+        lo_time = None
     return {
-        "high":  high,
-        "low":   low,
+        "high":         high,
+        "low":          low,
+        "fib_high_time": hi_time,
+        "fib_low_time":  lo_time,
         "fib_786": high - 0.786 * diff,
         "fib_618": high - 0.618 * diff,
         "fib_5":   high - 0.500 * diff,
@@ -2527,8 +2538,10 @@ async def trading_loop(app: Application):
                             "atr":          round(atr, 4),
                             "trend_1h":     trend_now,
                             "dxy_dir":      dxy_dir,
-                            "fib_high":     round(fibs["high"], 2),
-                            "fib_low":      round(fibs["low"], 2),
+                            "fib_high":      round(fibs["high"], 2),
+                            "fib_low":       round(fibs["low"], 2),
+                            "fib_high_time": fibs.get("fib_high_time"),
+                            "fib_low_time":  fibs.get("fib_low_time"),
                             "fib_786":      round(fibs["fib_786"], 2),
                             "fib_618":      round(fibs["fib_618"], 2),
                             "fib_5":        round(fibs["fib_5"], 2),
