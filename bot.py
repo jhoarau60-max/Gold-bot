@@ -2505,6 +2505,43 @@ async def trading_loop(app: Application):
                     f"{arrow} *{info['name']}* — Score `{score}/7` | `{price:.2f}` | RSI `{rsi_val:.1f}` | ADX `{adx_val:.1f}` | {dxy_label}{ml_label}"
                 )
 
+                # ── Écriture analyse en temps réel → Supabase bot_analysis ──
+                if sb_client and ticker == "XAUUSD=X":
+                    try:
+                        fibs = fibonacci_levels(df)
+                        trend_now = get_1h_trend(df)
+                        sl_m = (params or {}).get("sl_mult", 1.5)
+                        tp_m = (params or {}).get("tp_mult", 2.5)
+                        p_entry = round(price, 2) if direction else None
+                        p_sl    = round(price - atr*sl_m if direction=="BUY" else price + atr*sl_m, 2) if direction else None
+                        p_tp    = round(price + atr*tp_m if direction=="BUY" else price - atr*tp_m, 2) if direction else None
+                        sb_client.table("bot_analysis").upsert({
+                            "bot":          "gold",
+                            "ticker":       ticker,
+                            "timestamp":    datetime.now(TZ).isoformat(),
+                            "price":        round(price, 2),
+                            "direction":    direction,
+                            "score":        score,
+                            "rsi":          round(rsi_val, 2),
+                            "adx":          round(adx_val, 2),
+                            "atr":          round(atr, 4),
+                            "trend_1h":     trend_now,
+                            "dxy_dir":      dxy_dir,
+                            "fib_high":     round(fibs["high"], 2),
+                            "fib_low":      round(fibs["low"], 2),
+                            "fib_786":      round(fibs["fib_786"], 2),
+                            "fib_618":      round(fibs["fib_618"], 2),
+                            "fib_5":        round(fibs["fib_5"], 2),
+                            "fib_382":      round(fibs["fib_382"], 2),
+                            "fib_236":      round(fibs["fib_236"], 2),
+                            "planned_entry": p_entry,
+                            "planned_sl":    p_sl,
+                            "planned_tp":    p_tp,
+                        }, on_conflict="bot").execute()
+                        logger.info("bot_analysis mis à jour Supabase")
+                    except Exception as _e:
+                        logger.warning(f"bot_analysis write: {_e}")
+
                 if direction:
                     feats_final = collect_features(df, data, direction, dxy_dir)
                     feats_final["score"] = score
