@@ -268,9 +268,9 @@ def is_trading_session() -> bool:
     return 7 <= h < 22
 
 def is_blackout_session() -> bool:
-    """Blackout 21h-00h UTC — gap asiatique, spreads larges, pas de nouveaux trades."""
+    """Blackout 21h-06h UTC — session asiatique, spreads larges, pas de nouveaux trades."""
     h_utc = datetime.now(UTC).hour
-    return h_utc >= 21
+    return h_utc >= 21 or h_utc < 6
 
 def get_current_session() -> str:
     """Session active UTC pour logs et features ML."""
@@ -1276,7 +1276,7 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
             if sb_client and "supabase_id" in pos:
                 try:
                     sb_client.table("trade_history").update({
-                        "price_exit": round(price, 5),
+                        "price_exit": round(pos.get("exit_price", price), 5),
                         "pnl":        round(pnl, 2),
                         "status":     "closed",
                         "closed_at":  datetime.now(TZ).isoformat(),
