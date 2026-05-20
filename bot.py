@@ -734,6 +734,33 @@ def get_1h_trend(df_base: pd.DataFrame) -> str:
         return "DOWN"
     return "NEUTRAL"
 
+_4h_cache_gold: dict = {}
+
+def get_4h_trend(ticker: str) -> str:
+    """Tendance 4H Twelve Data (cache 4H). Filtre macro fiable — évite contre-tendance multi-jours."""
+    import time as _time
+    now = _time.time()
+    cached = _4h_cache_gold.get(ticker, {})
+    if now - cached.get("ts", 0) < 14400:
+        return cached.get("trend", "NEUTRAL")
+    df = fetch_twelvedata_candles(ticker, count=100, interval="4h")
+    if df is None or len(df) < 30:
+        _4h_cache_gold[ticker] = {"trend": "NEUTRAL", "ts": now}
+        return "NEUTRAL"
+    df = compute_indicators(df)
+    close = float(df["Close"].squeeze().iloc[-1])
+    ema21 = float(df["EMA21"].iloc[-1])
+    ema50 = float(df["EMA50"].iloc[-1])
+    if close > ema50 and ema21 > ema50:
+        trend = "UP"
+    elif close < ema50 and ema21 < ema50:
+        trend = "DOWN"
+    else:
+        trend = "NEUTRAL"
+    _4h_cache_gold[ticker] = {"trend": trend, "ts": now}
+    logger.info(f"Tendance 4H {ticker}: {trend} (close={close:.2f} EMA21={ema21:.2f} EMA50={ema50:.2f})")
+    return trend
+
 def fetch(ticker: str, period: str = "5d", interval: str = "5m") -> pd.DataFrame | None:
     # Twelve Data — priorité maximale (temps réel, pas de rate limit agressif)
     if ticker in TD_INST_MAP and TWELVEDATA_KEY:
@@ -997,9 +1024,9 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
     if 45 <= rsi <= 75:
         score_buy += 1
         reasons_buy.append(f"✅ RSI favorable achat ({rsi:.1f})")
-    elif 38 <= rsi <= 52:
+    elif 25 <= rsi < 45:
         score_sell += 1
-        reasons_sell.append(f"✅ RSI favorable vente ({rsi:.1f})")
+        reasons_sell.append(f"✅ RSI momentum baissier ({rsi:.1f})")
     elif rsi > 75:
         if not strong_uptrend:
             score_sell += 1
@@ -2486,11 +2513,15 @@ async def trading_loop(app: Application):
                     direction = None
 
                 if direction:
-                    # 1H multi-timeframe : signal doit être aligné avec tendance macro
+                    # 1H + 4H multi-timeframe : signal aligné avec les deux tendances macro
                     trend_1h = get_1h_trend(df)
+                    trend_4h = get_4h_trend(ticker)
                     dir_map  = {"BUY": "UP", "SELL": "DOWN"}
                     if trend_1h != "NEUTRAL" and trend_1h != dir_map.get(direction):
                         logger.info(f"Skip {ticker} — signal {direction} contre tendance 1H ({trend_1h})")
+                        direction = None
+                    if direction and trend_4h != "NEUTRAL" and trend_4h != dir_map.get(direction):
+                        logger.info(f"Skip {ticker} — signal {direction} contre tendance 4H ({trend_4h})")
                         direction = None
 
                 # ML prediction (si modèle actif — AUC >= 0.55)
