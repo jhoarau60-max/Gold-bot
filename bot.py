@@ -851,6 +851,12 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_mid"]   = bb_mid
     df["BB_width"] = (df["BB_upper"] - df["BB_lower"]) / bb_mid  # volatilité relative
 
+    # ── TEMA (Triple EMA, période 9 — confirmation momentum Freqtrade) ──
+    _t1 = c.ewm(span=9, adjust=False).mean()
+    _t2 = _t1.ewm(span=9, adjust=False).mean()
+    _t3 = _t2.ewm(span=9, adjust=False).mean()
+    df["TEMA"] = 3 * _t1 - 3 * _t2 + _t3
+
     # ── ATR (Wilder — mesure de volatilité pour stop-loss adaptatif) ──
     prev_c = c.shift(1)
     tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
@@ -2522,6 +2528,18 @@ async def trading_loop(app: Application):
                         direction = None
                     if direction and trend_4h != "NEUTRAL" and trend_4h != dir_map.get(direction):
                         logger.info(f"Skip {ticker} — signal {direction} contre tendance 4H ({trend_4h})")
+                        direction = None
+
+                if direction:
+                    # TEMA + BB guard (Freqtrade) — évite entrée sur momentum épuisé
+                    tema     = float(df["TEMA"].iloc[-1])
+                    tema_prev = float(df["TEMA"].iloc[-2])
+                    bb_mid   = float(df["BB_mid"].iloc[-1])
+                    if direction == "BUY" and not (tema <= bb_mid and tema > tema_prev):
+                        logger.info(f"Skip {ticker} BUY — TEMA ({tema:.2f}) > BB_mid ({bb_mid:.2f}) ou baissier")
+                        direction = None
+                    elif direction == "SELL" and not (tema >= bb_mid and tema < tema_prev):
+                        logger.info(f"Skip {ticker} SELL — TEMA ({tema:.2f}) < BB_mid ({bb_mid:.2f}) ou haussier")
                         direction = None
 
                 # ML prediction (si modèle actif — AUC >= 0.55)
