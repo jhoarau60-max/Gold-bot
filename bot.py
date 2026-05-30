@@ -2412,6 +2412,11 @@ async def trading_loop(app: Application):
                     if pnl_e < 0:
                         asyncio.create_task(post_mortem_analysis(app, pos))
 
+            # Weekend — or ne trade pas, aucune analyse ni notification
+            if datetime.now(TZ).weekday() >= 5:
+                await asyncio.sleep(30 * 60)
+                continue
+
             # Filtre session : pas de NOUVEAUX trades hors London/NY
             if not is_trading_session():
                 logger.info("Hors session — exits surveillés, pas de nouveaux trades")
@@ -2661,11 +2666,11 @@ async def scheduler(app: Application):
         today = now.strftime("%Y-%m-%d")
         h, m  = now.hour, now.minute
 
-        if h == 7 and m < 15 and last_morning != today:
+        if h == 7 and m < 15 and last_morning != today and now.weekday() < 5:
             await morning_report(app)
             last_morning = today
 
-        if h == 22 and m < 15 and last_evening != today:
+        if h == 22 and m < 15 and last_evening != today and now.weekday() < 5:
             await evening_report(app)
             await _push_gold_wiki()
             last_evening = today
