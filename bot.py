@@ -53,7 +53,7 @@ if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
-CAPITAL_INITIAL = float(ENV.get("CAPITAL", "50000"))
+CAPITAL_INITIAL = float(ENV.get("CAPITAL", "100"))
 
 OANDA_ACCOUNT_ID = ENV.get("OANDA_ACCOUNT_ID", "")
 OANDA_TOKEN      = ENV.get("OANDA_TOKEN", "")
@@ -2656,15 +2656,45 @@ async def trading_loop(app: Application):
         await asyncio.sleep(5 * 60)
 
 
+# ── SYNC CAPITAL RESET ─────────────────────────────────────────────────────────
+async def check_capital_reset_gold(data: dict, app):
+    """Détecte reset externe capital via bot_state Supabase (Sofia reset mensuel)."""
+    if not sb_client:
+        return
+    try:
+        res = sb_client.table("bot_state").select("capital, total_pnl").eq("id", 1).execute()
+        if not res.data:
+            return
+        sb_cap = float(res.data[0].get("capital") or 0)
+        if sb_cap > 0 and sb_cap < data["capital"] * 0.5 and abs(sb_cap - data["capital"]) > 5.0:
+            old_cap = data["capital"]
+            data["capital"]       = sb_cap
+            data["peak_capital"]  = sb_cap
+            data["daily_pnl"]     = 0.0
+            data["total_pnl"]     = 0.0
+            data["closed_trades"] = []
+            save_data(data)
+            logger.info(f"Reset capital Gold appliqué: {old_cap:.2f} → {sb_cap:.2f}")
+            await app.bot.send_message(JOHN_ID, f"♻️ Reset capital Gold Bot: {old_cap:.2f}→{sb_cap:.2f} $")
+    except Exception as e:
+        logger.warning(f"check_capital_reset_gold: {e}")
+
+
 # ── PLANIFICATEUR ──────────────────────────────────────────────────────────────
 async def scheduler(app: Application):
     last_morning = ""
     last_evening = ""
     last_audit   = ""
+    last_cap_check = ""
     while True:
         now   = datetime.now(TZ)
         today = now.strftime("%Y-%m-%d")
         h, m  = now.hour, now.minute
+
+        if m < 5 and last_cap_check != f"{today}-{h}":
+            data = load_data()
+            await check_capital_reset_gold(data, app)
+            last_cap_check = f"{today}-{h}"
 
         if h == 7 and m < 15 and last_morning != today and now.weekday() < 5:
             await morning_report(app)
