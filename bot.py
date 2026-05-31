@@ -1592,6 +1592,38 @@ def chart_capital(data: dict) -> io.BytesIO | None:
     return buf
 
 
+# ── RÈGLES TRADING — LIVRES PDF VIA SUPABASE WIKI ─────────────────────────────
+_pdf_rules_cache: str = ""
+_pdf_rules_ts: float = 0.0
+
+def load_pdf_trading_rules() -> str:
+    global _pdf_rules_cache, _pdf_rules_ts
+    import time as _time
+    if _time.time() - _pdf_rules_ts < 21600 and _pdf_rules_cache:
+        return _pdf_rules_cache
+    try:
+        import httpx as _httpx
+        _key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN2Z2d4a3R5YnpicnRza2N3bHhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyODM2MjcsImV4cCI6MjA4OTg1OTYyN30.cfHsAvmgcXYvedCz1fZCHlxOApupKCxnt8t9e8KzNBs"
+        r = _httpx.get(
+            "https://cvggxktybzbrtskcwlxp.supabase.co/rest/v1/john_memory"
+            "?content=like.%5BPDF_TRADING%25&select=content&order=created_at&limit=8",
+            headers={"apikey": _key, "Authorization": f"Bearer {_key}"},
+            timeout=10
+        )
+        if r.is_success:
+            excerpts = []
+            for row in r.json():
+                c = row["content"]
+                idx = c.lower().find("citations")
+                excerpts.append(c[idx:idx+500].strip() if idx > 0 else c[-400:].strip())
+            _pdf_rules_cache = "\n---\n".join(excerpts[:4])
+            _pdf_rules_ts = _time.time()
+            return _pdf_rules_cache
+    except Exception as e:
+        logger.error(f"load_pdf_trading_rules: {e}")
+    return ""
+
+
 # ── IA PRÉDICTIVE — PROMPT INSPIRÉ DES PLUS GRANDS TRADERS ────────────────────
 async def ai_prediction(instruments: dict, data: dict) -> str:
     if not GEMINI_API_KEY:
@@ -1629,6 +1661,9 @@ async def ai_prediction(instruments: dict, data: dict) -> str:
                         if t.get("entry_time","")[:10] == datetime.now(TZ).strftime("%Y-%m-%d")]
         wins_today = [t for t in closed_today if t.get("pnl",0) > 0]
 
+        _pdf_rules = load_pdf_trading_rules()
+        _pdf_section = f"\n\nPRINCIPES EXPERTS (livres trading spécialisés) :\n{_pdf_rules[:700]}\n" if _pdf_rules else ""
+
         prompt = f"""Tu es un système d'intelligence artificielle de trading de niveau institutionnel.
 Tu combines les philosophies et techniques des plus grands traders de l'histoire :
 
@@ -1640,7 +1675,7 @@ Tu combines les philosophies et techniques des plus grands traders de l'histoire
 - ELDER ALEXANDER : Triple Screen System — confirmer sur plusieurs timeframes avant d'entrer
 - LARRY WILLIAMS : Cyclicité des marchés, timing précis des entrées
 - AL BROOKS (Price Action) : Lire les chandeliers, structure du marché, momentum
-
+{_pdf_section}
 DONNÉES DE MARCHÉ ACTUELLES :{market_lines}
 
 ÉTAT DU PORTEFEUILLE :
