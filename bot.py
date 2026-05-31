@@ -2448,7 +2448,13 @@ async def trading_loop(app: Application):
                         pass
                     if JOETRADE_GROUP_ID:
                         try:
-                            await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown")
+                            import os as _os
+                            _img = "trade_gagnant.jpg" if pnl_e > 0 else "trade_perdant.jpg"
+                            if _os.path.exists(_img):
+                                with open(_img, "rb") as _f:
+                                    await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                            else:
+                                await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
                         except Exception:
                             pass
                     if pnl_e < 0:
