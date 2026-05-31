@@ -52,6 +52,7 @@ if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN manquant! Clés dispo: " + str([k for k in ENV if "TOKEN" in k.upper() or "TELEGRAM" in k.upper()]))
     raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
+JOETRADE_GROUP_ID = int(ENV.get("JOETRADE_GROUP_ID", "-1003942074689"))
 GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
 CAPITAL_INITIAL = float(ENV.get("CAPITAL", "100"))
 
@@ -2444,6 +2445,11 @@ async def trading_loop(app: Application):
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                     except Exception:
                         pass
+                    if JOETRADE_GROUP_ID:
+                        try:
+                            await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown")
+                        except Exception:
+                            pass
                     if pnl_e < 0:
                         asyncio.create_task(post_mortem_analysis(app, pos))
 
@@ -2673,6 +2679,11 @@ async def trading_loop(app: Application):
                             await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                         except Exception:
                             pass
+                        if JOETRADE_GROUP_ID:
+                            try:
+                                await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown")
+                            except Exception:
+                                pass
 
             # Résumé toutes les heures (cycle 12 = 12×5min)
             if cycle % 12 == 0 and hourly_lines:
