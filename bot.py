@@ -53,6 +53,7 @@ if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 JOETRADE_GROUP_ID = int(ENV.get("JOETRADE_GROUP_ID", "-1003942074689"))
+JOETRADE_THREAD_GOLD = 40
 GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
 CAPITAL_INITIAL = float(ENV.get("CAPITAL", "100"))
 
@@ -2681,7 +2682,7 @@ async def trading_loop(app: Application):
                             pass
                         if JOETRADE_GROUP_ID:
                             try:
-                                await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown")
+                                await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
                             except Exception:
                                 pass
 
