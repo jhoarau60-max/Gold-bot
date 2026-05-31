@@ -541,7 +541,7 @@ def adaptive_params(data: dict) -> dict:
     learned = data.get("learned_params", {})
 
     if len(recent) < 5:
-        base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 1.5, "tp_mult": 6.0, "mode": "démarrage"}
+        base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 2.632, "tp_mult": 5.343, "mode": "démarrage"}
     else:
         wr = sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent)
         if wr < 0.35:
@@ -549,7 +549,7 @@ def adaptive_params(data: dict) -> dict:
         elif wr > 0.65:
             base = {"threshold": 5, "risk_per_trade": 0.025, "sl_mult": 1.3, "tp_mult": 5.2, "mode": "sélectif"}
         else:
-            base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 1.5, "tp_mult": 6.0, "mode": "normal"}
+            base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 2.632, "tp_mult": 5.343, "mode": "normal"}
 
     if learned:
         if "threshold"      in learned: base["threshold"]      = max(3, min(6,   int(learned["threshold"])))
@@ -822,7 +822,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── TENDANCE (Elder Triple Screen — Screen 1 : timeframe supérieur) ──
     df["EMA9"]   = c.ewm(span=9,   adjust=False).mean()
-    df["EMA21"]  = c.ewm(span=21,  adjust=False).mean()
+    df["EMA21"]  = c.ewm(span=20,  adjust=False).mean()
     df["EMA50"]  = c.ewm(span=50,  adjust=False).mean()
     df["EMA200"] = c.ewm(span=200, adjust=False).mean()
 
@@ -837,7 +837,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     delta = c.diff()
     gain  = delta.clip(lower=0)
     loss  = -delta.clip(upper=0)
-    df["RSI"] = 100 - 100 / (1 + gain.rolling(14).mean() / loss.rolling(14).mean())
+    df["RSI"] = 100 - 100 / (1 + gain.rolling(13).mean() / loss.rolling(14).mean())
 
     # ── Stochastique (Lane — momentum de court terme) ──
     low14  = l.rolling(14).min()
@@ -1028,7 +1028,7 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         reasons_sell.append("✅ MACD baissier")
 
     # 4. RSI (Wilder) — zone élargie en tendance forte
-    strong_uptrend = adx > 30 and ema9 > ema21
+    strong_uptrend = adx > 29.3 and ema9 > ema21
     if 45 <= rsi <= 75:
         score_buy += 1
         reasons_buy.append(f"✅ RSI favorable achat ({rsi:.1f})")
@@ -1054,7 +1054,7 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
         reasons_sell.append(f"✅ Stochastique baissier ({stk:.1f})")
 
     # 6. ADX — force de la tendance (Richard Dennis) — minimum 30
-    if adx > 30:
+    if adx > 29.3:
         if ema9 > ema21:
             score_buy += 1
             reasons_buy.append(f"✅ ADX fort ({adx:.1f}) — tendance haussière confirmée")
@@ -1076,7 +1076,7 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
     threshold = 4  # Relevé 3→4 : exige plus de confirmations avant d'entrer
 
     # Filtre ADX obligatoire — pas de trade en consolidation (ADX < 22)
-    if adx < 22:
+    if adx < 20.7:
         logger.info(f"Signal bloqué — ADX trop faible ({adx:.1f}) : marché en range, pas de trade")
         return None, max(score_buy, score_sell), []
 
