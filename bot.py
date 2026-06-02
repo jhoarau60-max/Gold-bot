@@ -235,24 +235,13 @@ def load_data() -> dict:
     if os.path.exists(TRADES_FILE):
         with open(TRADES_FILE) as f:
             data = json.load(f)
-        # Sync capital depuis Supabase — corrige peak_capital si reset externe
-        if sb_client:
-            try:
-                sr = sb_client.table("bot_state").select("capital").eq("id", 1).execute()
-                if sr.data:
-                    sb_cap = float(sr.data[0].get("capital") or 0)
-                    if sb_cap > 0 and sb_cap < data.get("capital", sb_cap) * 0.5:
-                        logger.info(f"Reset détecté au chargement: {data['capital']:.2f}→{sb_cap:.2f}, peak reset")
-                        data["capital"]      = sb_cap
-                        data["peak_capital"] = sb_cap
-                        data["total_pnl"]    = 0.0
-                        data["daily_pnl"]    = 0.0
-                        data["daily_trades"] = 0
-                        data["closed_trades"] = []
-                        data["open_positions"] = []
-                        save_data(data)
-            except Exception as _e:
-                logger.warning(f"load_data sync Supabase: {_e}")
+        # Corrige peak_capital si aberrant (vieux capital avant reset)
+        cap = data.get("capital", CAPITAL_INITIAL)
+        peak = data.get("peak_capital", cap)
+        if peak > cap * 1.5:
+            logger.info(f"peak_capital aberrant ({peak:.2f}) corrigé → {cap:.2f}")
+            data["peak_capital"] = cap
+            save_data(data)
         return data
     # trades.json absent (restart Railway) → reconstruire depuis Supabase
     logger.warning("trades.json absent — reconstruction depuis Supabase")
