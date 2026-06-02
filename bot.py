@@ -2663,6 +2663,18 @@ async def trading_loop(app: Application):
                 if direction:
                     feats_final = collect_features(df, data, direction, dxy_dir)
                     feats_final["score"] = score
+                    # Sync capital depuis Supabase avant ouverture trade
+                    if sb_client:
+                        try:
+                            _sr = sb_client.table("bot_state").select("capital").eq("id", 1).execute()
+                            if _sr.data:
+                                _sb_cap = float(_sr.data[0].get("capital") or 0)
+                                if _sb_cap > 0 and _sb_cap < data["capital"] * 0.9:
+                                    logger.info(f"Capital sync avant trade: {data['capital']:.2f} → {_sb_cap:.2f}")
+                                    data["capital"] = _sb_cap
+                                    data["peak_capital"] = _sb_cap
+                        except Exception as _ce:
+                            logger.warning(f"Capital sync avant trade: {_ce}")
                     pos = open_trade(data, ticker, direction, price, atr, score, params=params)
                     data = load_data()
                     if pos:
