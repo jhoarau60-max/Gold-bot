@@ -2025,13 +2025,13 @@ async def no_trade_alert(app: Application, data: dict):
         except Exception:
             pass
     hours_silent = (datetime.now(TZ) - last_dt).total_seconds() / 3600 if last_dt else 999
-    if hours_silent >= 48:
-        days = int(hours_silent // 24)
+    if hours_silent >= 24:
+        hours_txt = f"{int(hours_silent)}h" if hours_silent < 48 else f"{int(hours_silent // 24)} jours"
         try:
             await app.bot.send_message(
                 JOHN_ID,
                 f"⚠️ *GOLD BOT — ALERTE SILENCE*\n\n"
-                f"Aucun trade depuis *{days} jours* !\n"
+                f"Aucun trade depuis *{hours_txt}* !\n"
                 f"Capital : `{data.get('capital', 0):.2f} $`\n\n"
                 f"_Vérifie : filtres trop stricts, API données, logs Railway._",
                 parse_mode="Markdown"
