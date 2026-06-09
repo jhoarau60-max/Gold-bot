@@ -2626,15 +2626,14 @@ async def trading_loop(app: Application):
                             direction = None
 
                 if direction:
-                    # TEMA + BB guard (Freqtrade) — évite entrée sur momentum épuisé
-                    tema     = float(df["TEMA"].iloc[-1])
+                    # TEMA momentum guard — momentum TEMA aligné avec direction
+                    tema      = float(df["TEMA"].iloc[-1])
                     tema_prev = float(df["TEMA"].iloc[-2])
-                    bb_mid   = float(df["BB_mid"].iloc[-1])
-                    if direction == "BUY" and not (tema <= bb_mid and tema > tema_prev):
-                        logger.info(f"Skip {ticker} BUY — TEMA ({tema:.2f}) > BB_mid ({bb_mid:.2f}) ou baissier")
+                    if direction == "BUY" and tema < tema_prev:
+                        logger.info(f"Skip {ticker} BUY — TEMA baissier ({tema:.2f} < {tema_prev:.2f})")
                         direction = None
-                    elif direction == "SELL" and not (tema >= bb_mid and tema < tema_prev):
-                        logger.info(f"Skip {ticker} SELL — TEMA ({tema:.2f}) < BB_mid ({bb_mid:.2f}) ou haussier")
+                    elif direction == "SELL" and tema > tema_prev:
+                        logger.info(f"Skip {ticker} SELL — TEMA haussier ({tema:.2f} > {tema_prev:.2f})")
                         direction = None
 
                 # ML prediction (si modèle actif — AUC >= 0.55)
