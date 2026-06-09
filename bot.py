@@ -2009,6 +2009,37 @@ async def oracle_loop(app: Application):
         await asyncio.sleep(5 * 60)
 
 
+# ── WATCHDOG SILENCE ──────────────────────────────────────────────────────────
+async def no_trade_alert(app: Application, data: dict):
+    """Alerte Telegram si aucun trade depuis 48h un jour de semaine."""
+    if datetime.now(TZ).weekday() >= 5:
+        return
+    closed = data.get("closed_trades", [])
+    last_dt = None
+    if closed:
+        try:
+            raw = closed[-1].get("exit_time") or closed[-1].get("entry_time", "")
+            last_dt = datetime.fromisoformat(raw)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=TZ)
+        except Exception:
+            pass
+    hours_silent = (datetime.now(TZ) - last_dt).total_seconds() / 3600 if last_dt else 999
+    if hours_silent >= 48:
+        days = int(hours_silent // 24)
+        try:
+            await app.bot.send_message(
+                JOHN_ID,
+                f"⚠️ *GOLD BOT — ALERTE SILENCE*\n\n"
+                f"Aucun trade depuis *{days} jours* !\n"
+                f"Capital : `{data.get('capital', 0):.2f} $`\n\n"
+                f"_Vérifie : filtres trop stricts, API données, logs Railway._",
+                parse_mode="Markdown"
+            )
+            logger.warning(f"Alerte silence Gold — {hours_silent:.0f}h sans trade")
+        except Exception as e:
+            logger.error(f"no_trade_alert Gold: {e}")
+
 # ── RAPPORTS ───────────────────────────────────────────────────────────────────
 async def morning_report(app: Application):
     data        = load_data()
@@ -2771,7 +2802,13 @@ async def scheduler(app: Application):
 
         if h == 7 and m < 15 and last_morning != today and now.weekday() < 5:
             await morning_report(app)
+            data_w = load_data()
+            await no_trade_alert(app, data_w)
             last_morning = today
+
+        if h == 13 and m < 5 and last_cap_check != f"{today}-13":
+            data_w = load_data()
+            await no_trade_alert(app, data_w)
 
         if h == 22 and m < 15 and last_evening != today and now.weekday() < 5:
             await evening_report(app)
