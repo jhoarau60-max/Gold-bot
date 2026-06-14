@@ -1916,6 +1916,9 @@ async def oracle_loop(app: Application):
     while True:
         try:
             now      = datetime.now(TZ)
+            if now.weekday() >= 5:  # Samedi/dimanche — or ne trade pas
+                await asyncio.sleep(30 * 60)
+                continue
             # Slot change toutes les 2h — chaque domaine tourne une fois par slot
             time_slot = f"{now.strftime('%Y-%m-%d')}-{now.hour // 2}"
 
@@ -2805,7 +2808,7 @@ async def scheduler(app: Application):
             await no_trade_alert(app, data_w)
             last_morning = today
 
-        if h == 13 and m < 5 and last_cap_check != f"{today}-13":
+        if h == 13 and m < 5 and last_cap_check != f"{today}-13" and now.weekday() < 5:
             data_w = load_data()
             await no_trade_alert(app, data_w)
 
