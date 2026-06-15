@@ -2297,6 +2297,7 @@ async def gemini_param_adjustment(app: Application, data: dict):
     inst_summary = "\n".join(f"- {k}: {v['wins']}G/{v['losses']}P | P&L {v['pnl']:+.2f}€" for k, v in by_inst.items())
     wr = sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent) * 100
     current = data.get("learned_params", {})
+    _default_params = {"threshold": 4, "risk_per_trade": 0.01, "sl_mult": 1.5, "tp_mult": 3.75}
 
     prompt = f"""Bot de trading Or (XAU/USD). Analyse et recommande des ajustements JSON.
 
@@ -2307,7 +2308,7 @@ PERFORMANCE ({len(recent)} trades) :
 PAR INSTRUMENT :
 {inst_summary}
 
-PARAMS ACTUELS : {json.dumps(current if current else {{"threshold":4,"risk_per_trade":0.01,"sl_mult":1.5,"tp_mult":3.75}})}
+PARAMS ACTUELS : {json.dumps(current if current else _default_params)}
 
 RÈGLES : Si instrument 0G/2+P → blacklist 7j. Si WR<40% → réduire risque, augmenter seuil.
 
