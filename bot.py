@@ -2912,34 +2912,41 @@ async def scheduler(app: Application):
     last_audit   = ""
     last_cap_check = ""
     while True:
-        now   = datetime.now(TZ)
-        today = now.strftime("%Y-%m-%d")
-        h, m  = now.hour, now.minute
+        try:
+            now   = datetime.now(TZ)
+            today = now.strftime("%Y-%m-%d")
+            h, m  = now.hour, now.minute
 
-        if m < 5 and last_cap_check != f"{today}-{h}":
-            data = load_data()
-            await check_capital_reset_gold(data, app)
-            last_cap_check = f"{today}-{h}"
+            if m < 5 and last_cap_check != f"{today}-{h}":
+                data = load_data()
+                await check_capital_reset_gold(data, app)
+                last_cap_check = f"{today}-{h}"
 
-        if h == 7 and m < 15 and last_morning != today and now.weekday() < 5:
-            await morning_report(app)
-            data_w = load_data()
-            await no_trade_alert(app, data_w)
-            last_morning = today
+            if h == 7 and m < 15 and last_morning != today and now.weekday() < 5:
+                await morning_report(app)
+                data_w = load_data()
+                await no_trade_alert(app, data_w)
+                last_morning = today
 
-        if h == 13 and m < 5 and last_cap_check != f"{today}-13" and now.weekday() < 5:
-            data_w = load_data()
-            await no_trade_alert(app, data_w)
+            if h == 13 and m < 5 and last_cap_check != f"{today}-13" and now.weekday() < 5:
+                data_w = load_data()
+                await no_trade_alert(app, data_w)
 
-        if h == 22 and m < 15 and last_evening != today and now.weekday() < 5:
-            await evening_report(app)
-            await _push_gold_wiki()
-            last_evening = today
+            if h == 22 and m < 15 and last_evening != today and now.weekday() < 5:
+                await evening_report(app)
+                await _push_gold_wiki()
+                last_evening = today
 
-        if h == 8 and m < 15 and now.weekday() == 6 and last_audit != today:
-            data = load_data()
-            await weekly_audit(app, data)
-            last_audit = today
+            if h == 8 and m < 15 and now.weekday() == 6 and last_audit != today:
+                data = load_data()
+                await weekly_audit(app, data)
+                last_audit = today
+        except Exception as e:
+            logger.error(f"scheduler: {e}")
+            try:
+                await app.bot.send_message(JOHN_ID, f"⚠️ Erreur dans le planificateur Gold Bot: {e}")
+            except Exception:
+                pass
 
         await asyncio.sleep(60)
 
