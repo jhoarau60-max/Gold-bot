@@ -2882,6 +2882,10 @@ async def trading_loop(app: Application):
 
         except Exception as e:
             logger.error(f"Erreur boucle trading: {e}")
+            try:
+                await app.bot.send_message(JOHN_ID, f"⚠️ Gold Bot — erreur boucle trading: {e}")
+            except Exception:
+                pass
 
         await asyncio.sleep(5 * 60)
 
