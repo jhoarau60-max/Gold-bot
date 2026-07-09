@@ -548,21 +548,34 @@ def load_learned_params() -> dict:
     return {}
 
 def adaptive_params(data: dict) -> dict:
-    """Niveau 1 : ajuste risque/seuil selon win rate glissant.
+    """Niveau 1 : ajuste risque/seuil selon win rate glissant (avec hystérésis anti-oscillation).
     Niveau 2 : applique les overrides Gemini (bornés)."""
-    recent  = data.get("closed_trades", [])[-20:]
-    learned = data.get("learned_params", {})
+    recent    = data.get("closed_trades", [])[-20:]
+    learned   = data.get("learned_params", {})
+    prev_mode = data.get("adaptive_mode", "démarrage")
 
-    if len(recent) < 5:
+    if len(recent) < 20:
         base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 2.632, "tp_mult": 5.343, "mode": "démarrage"}
     else:
         wr = sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent)
-        if wr < 0.35:
+        # Hystérésis : seuils plus larges pour ENTRER dans un mode extrême que pour en SORTIR —
+        # évite de changer de réglages à chaque trade sur du bruit statistique autour de 35%/65%.
+        entering_low  = wr < 0.30 if prev_mode != "récupération" else wr < 0.40
+        entering_high = wr > 0.70 if prev_mode != "sélectif"     else wr > 0.60
+
+        if entering_low:
             base = {"threshold": 5, "risk_per_trade": 0.015, "sl_mult": 1.8, "tp_mult": 7.2, "mode": "récupération"}
-        elif wr > 0.65:
+        elif entering_high:
             base = {"threshold": 5, "risk_per_trade": 0.025, "sl_mult": 1.3, "tp_mult": 5.2, "mode": "sélectif"}
         else:
             base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 2.632, "tp_mult": 5.343, "mode": "normal"}
+
+        if base["mode"] != prev_mode:
+            data.setdefault("mode_history", []).append({
+                "from": prev_mode, "to": base["mode"],
+                "at": datetime.now(TZ).isoformat(), "win_rate": round(wr, 3), "trades_sample": len(recent),
+            })
+        data["adaptive_mode"] = base["mode"]
 
     if learned:
         if "threshold"      in learned: base["threshold"]      = max(3, min(6,   int(learned["threshold"])))
@@ -2405,7 +2418,7 @@ async def gemini_param_adjustment(app: Application, data: dict):
     if not GEMINI_API_KEY:
         return
     recent = data.get("closed_trades", [])[-30:]
-    if len(recent) < 5:
+    if len(recent) < 30:
         return
 
     by_inst: dict = {}
@@ -2449,16 +2462,39 @@ JSON UNIQUEMENT (pas de markdown) :
                 raw = raw[5:]
         params_new = json.loads(raw)
 
+        current_bounded = {
+            "threshold":      current.get("threshold", 4),
+            "risk_per_trade": current.get("risk_per_trade", 0.01),
+            "sl_mult":        current.get("sl_mult", 1.5),
+            "tp_mult":        current.get("tp_mult", 3.75),
+        }
+
+        def _step(name, new_val, max_delta, lo, hi):
+            """Plafonne le changement à ±max_delta par rapport à la valeur actuelle en plus des bornes absolues —
+            évite qu'une seule semaine fasse sauter un paramètre d'un extrême à l'autre."""
+            old_val = current_bounded[name]
+            capped  = max(old_val - max_delta, min(old_val + max_delta, new_val))
+            return max(lo, min(hi, capped))
+
         learned = {
-            "threshold":      max(3, min(6,   int(params_new.get("threshold",      4)))),
-            "risk_per_trade": max(0.003, min(0.02, float(params_new.get("risk_per_trade", 0.01)))),
-            "sl_mult":        max(1.0, min(3.0,    float(params_new.get("sl_mult",        1.5)))),
-            "tp_mult":        max(2.0, min(6.0,    float(params_new.get("tp_mult",        3.75)))),
+            "threshold":      int(round(_step("threshold",      params_new.get("threshold", 4),            1,     3,     6))),
+            "risk_per_trade": _step("risk_per_trade", float(params_new.get("risk_per_trade", 0.01)),        0.005, 0.003, 0.02),
+            "sl_mult":        _step("sl_mult",        float(params_new.get("sl_mult",        1.5)),         0.5,   1.0,   3.0),
+            "tp_mult":        _step("tp_mult",        float(params_new.get("tp_mult",        3.75)),        1.0,   2.0,   6.0),
             "rationale":      str(params_new.get("rationale", "")),
             "updated_at":     datetime.now(TZ).isoformat(),
         }
         for tk, secs in params_new.get("blacklist", {}).items():
             data.setdefault("instrument_blacklist", {})[tk] = datetime.now(TZ).timestamp() + int(secs)
+
+        # Historique traçable de chaque changement — relier une période de perf à un jeu de params précis.
+        data.setdefault("params_history", []).append({
+            "at": learned["updated_at"], "before": current_bounded, "after": {
+                "threshold": learned["threshold"], "risk_per_trade": learned["risk_per_trade"],
+                "sl_mult": learned["sl_mult"], "tp_mult": learned["tp_mult"],
+            },
+            "trades_sample": len(recent), "rationale": learned["rationale"],
+        })
 
         data["learned_params"] = learned
         save_data(data)
