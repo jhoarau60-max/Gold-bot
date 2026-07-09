@@ -1448,7 +1448,7 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
                 if d_pos == "BUY":
                     if price > pos.get("trail_peak", price):
                         pos["trail_peak"] = price
-                    if not pos.get("trailing_active") and price >= pos["entry_price"] + atr_e:
+                    if not pos.get("trailing_active") and price >= pos["entry_price"] + trail_dist:
                         pos["trailing_active"] = True
                         logger.info(f"Trailing activé {ticker} BUY")
                     if pos.get("trailing_active"):
@@ -1458,7 +1458,7 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
                 else:
                     if price < pos.get("trail_peak", price):
                         pos["trail_peak"] = price
-                    if not pos.get("trailing_active") and price <= pos["entry_price"] - atr_e:
+                    if not pos.get("trailing_active") and price <= pos["entry_price"] - trail_dist:
                         pos["trailing_active"] = True
                         logger.info(f"Trailing activé {ticker} SELL")
                     if pos.get("trailing_active"):
