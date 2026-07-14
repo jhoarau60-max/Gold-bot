@@ -3231,6 +3231,76 @@ async def cmd_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def cmd_propfirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dashboard RaiseMyFund dans Telegram — mêmes 4 métriques que le site."""
+    data = load_data()
+
+    cap_init   = CAPITAL_INITIAL         # 10 000$
+    cap_cur    = data["capital"]
+    daily_pnl  = data["daily_pnl"]
+    total_pnl  = data["total_pnl"]
+
+    # Perte journalière (budget = 500$)
+    daily_loss = min(daily_pnl, 0)       # valeur négative ou 0
+    daily_used = abs(daily_loss)
+    daily_left = max(0.0, 500.0 - daily_used)
+    daily_pct  = daily_left / 500.0 * 100
+    daily_floor = cap_cur - daily_left
+    daily_ok   = daily_used < 500.0
+
+    # Drawdown global (budget = 1 000$)
+    dd_used    = max(0.0, cap_init - cap_cur)
+    dd_left    = max(0.0, 1000.0 - dd_used)
+    dd_pct     = dd_left / 1000.0 * 100
+    dd_ok      = dd_used < 1000.0
+
+    # Objectif profit (+1 000$)
+    profit_done = max(0.0, cap_cur - cap_init)
+    obj_pct     = min(profit_done / 1000.0 * 100, 100.0)
+    obj_ok      = profit_done >= 1000.0
+
+    # Règle des 45% (gain journalier / 450$)
+    daily_gain  = max(daily_pnl, 0.0)
+    rule45_pct  = min(daily_gain / 450.0 * 100, 100.0)
+    rule45_ok   = daily_gain < 450.0
+
+    # Solde MT5 en temps réel (si bridge actif)
+    mt5_balance = None
+    if MT5_BRIDGE_URL and MT5_BRIDGE_TOKEN:
+        try:
+            import httpx as _httpx
+            r = _httpx.get(f"{MT5_BRIDGE_URL}/health",
+                           headers={"X-Token": MT5_BRIDGE_TOKEN}, timeout=5)
+            if r.status_code == 200:
+                mt5_balance = r.json().get("balance")
+        except Exception:
+            pass
+
+    em_d  = "✅" if daily_ok  else "🛑"
+    em_dd = "✅" if dd_ok     else "🛑"
+    em_o  = "🏆" if obj_ok    else "🎯"
+    em_45 = "✅" if rule45_ok else "⚠️"
+
+    mt5_line = f"\n💹 *Solde MT5 réel :* `{mt5_balance:.2f}$`" if mt5_balance else ""
+
+    msg = (
+        f"📊 *PROP FIRM — RaiseMyFund #1046385*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{em_d}  *Perte journalière* : `{daily_used:.2f}$` / 500$\n"
+        f"    Restant : `{daily_left:.2f}$` ({daily_pct:.1f}%) | Plancher : `{daily_floor:.2f}$`\n\n"
+        f"{em_dd} *Drawdown global* : `{dd_used:.2f}$` / 1 000$\n"
+        f"    Restant : `{dd_left:.2f}$` ({dd_pct:.1f}%)\n\n"
+        f"{em_o}  *Objectif profit* : `{profit_done:.2f}$` / 1 000$\n"
+        f"    Progression : `{obj_pct:.1f}%`\n\n"
+        f"{em_45} *Règle 45%* : `{daily_gain:.2f}$` / 450$ aujourd'hui\n"
+        f"    Utilisé : `{rule45_pct:.1f}%`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Capital bot : `{cap_cur:.2f}$` | P&L : `{total_pnl:+.2f}$`"
+        f"{mt5_line}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 async def cmd_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Analyse du marché en cours...")
     data        = load_data()
@@ -3308,6 +3378,7 @@ async def main():
     app.add_handler(CommandHandler("signal",  cmd_signal))
     app.add_handler(CommandHandler("myid",         cmd_myid))
     app.add_handler(CommandHandler("reset_capital", cmd_reset_capital))
+    app.add_handler(CommandHandler("propfirm",      cmd_propfirm))
     app.add_handler(CommandHandler("wiki",          cmd_wiki))
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
     app.add_handler(MessageHandler(filters.Regex(r'https?://\S+') & filters.ChatType.PRIVATE, cmd_wiki))
