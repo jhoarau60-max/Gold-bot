@@ -2989,7 +2989,7 @@ async def scheduler(app: Application):
                 await _push_gold_wiki()
                 last_evening = today
 
-            if h == 8 and m < 15 and now.weekday() == 6 and last_audit != today:
+            if now.weekday() == 6 and last_audit != today:
                 data = load_data()
                 await weekly_audit(app, data)
                 last_audit = today
