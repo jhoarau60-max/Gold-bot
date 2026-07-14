@@ -285,14 +285,14 @@ def get_instruments() -> dict:
     return WEEKDAY_INSTRUMENTS
 
 def is_trading_session() -> bool:
-    """ICT Kill Zones — London Open (9h-12h) + NY Open (15h-18h) Paris."""
+    """ICT Kill Zones — Asian (1h-4h) + London (9h-12h) + NY (15h-18h) Paris."""
     h = datetime.now(TZ).hour
-    return (9 <= h < 12) or (15 <= h < 18)
+    return (1 <= h < 4) or (9 <= h < 12) or (15 <= h < 18)
 
 def is_blackout_session() -> bool:
-    """Blackout 21h-06h UTC — session asiatique, spreads larges, pas de nouveaux trades."""
-    h_utc = datetime.now(UTC).hour
-    return h_utc >= 21 or h_utc < 6
+    """Blackout 21h-1h Paris — entre fermeture NY et ouverture Asian."""
+    h = datetime.now(TZ).hour
+    return h >= 21 or h < 1
 
 def get_current_session() -> str:
     """Session active UTC pour logs et features ML."""
