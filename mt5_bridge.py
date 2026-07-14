@@ -38,6 +38,8 @@ LOT_DIVISOR = {
     "XAGUSD": 5000.0,
 }
 
+MAX_LOT_SIZE = 0.03  # cap prop firm RaiseMyFund — jamais plus de 0.03 lots
+
 
 def ensure_mt5():
     """Initialise MT5 si pas encore fait."""
@@ -54,8 +56,9 @@ def convert_to_lots(symbol: str, qty: float) -> float:
     info = mt5.symbol_info(symbol)
     vol_min  = info.volume_min  if info else 0.01
     vol_step = info.volume_step if info else 0.01
-    # Arrondi au step, minimum vol_min
+    # Arrondi au step, minimum vol_min, maximum MAX_LOT_SIZE
     lots = max(vol_min, round(round(lots / vol_step) * vol_step, 2))
+    lots = min(lots, MAX_LOT_SIZE)
     return lots
 
 
