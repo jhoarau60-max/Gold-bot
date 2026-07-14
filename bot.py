@@ -3349,23 +3349,23 @@ async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ Montant invalide. Usage: `/reset_capital 9958.94`", parse_mode="Markdown")
             return
-    old_cap = data["capital"]
+    old_cap   = data["capital"]
+    real_pnl  = round(new_cap - CAPITAL_INITIAL, 2)  # -41.06$ si new_cap=9958.94 et CAPITAL_INITIAL=10000
     data["capital"]       = new_cap
-    data["peak_capital"]  = new_cap
-    data["total_pnl"]     = 0.0
-    data["daily_pnl"]     = 0.0
+    data["peak_capital"]  = CAPITAL_INITIAL           # pic = capital initial du challenge (10 000$)
+    data["total_pnl"]     = real_pnl                  # P&L réel depuis début challenge
+    data["daily_pnl"]     = 0.0                       # reset journalier uniquement
     data["daily_trades"]  = 0
-    data["win_streak"]    = 0
-    data["loss_streak"]   = 0
     save_data(data)
     await update.message.reply_text(
-        f"✅ *Capital réinitialisé*\n\n"
-        f"Ancien : `{old_cap:.2f}$`\n"
-        f"Nouveau : `{new_cap:.2f}$`\n"
-        f"P&L remis à zéro.",
+        f"✅ *Capital synchronisé RaiseMyFund*\n\n"
+        f"Capital initial challenge : `{CAPITAL_INITIAL:.2f}$`\n"
+        f"Capital actuel : `{new_cap:.2f}$`\n"
+        f"P&L total : `{real_pnl:+.2f}$`\n"
+        f"P&L journalier : remis à `0.00$`",
         parse_mode="Markdown"
     )
-    logger.info(f"Capital reset par John: {old_cap:.2f} → {new_cap:.2f}")
+    logger.info(f"Capital sync par John: {old_cap:.2f} → {new_cap:.2f} (total_pnl={real_pnl:.2f})")
 
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
