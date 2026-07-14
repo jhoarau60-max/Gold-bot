@@ -110,7 +110,7 @@ TICKER_TO_BOT = {
     "XAGUSD=X": "silver",
 }
 RISK_PER_TRADE      = 0.01   # 1 % du capital par trade
-MAX_DAILY_LOSS      = 0.05   # 5 % de perte max par jour (règle RaiseMyFund : 5% capital initial)
+MAX_DAILY_LOSS      = 0.045  # 4.5% de perte max par jour = 450$ sur 10k (marge de 50$ sous limite RaiseMyFund 500$/jour)
 MAX_POSITION_HOURS  = 4      # timeout auto-close : scalping max 4h
 MAX_DAILY_TRADES    = 4      # max 4 trades/jour
 DRAWDOWN_ALERT      = 0.08   # 8% drawdown → risk réduit à 0.5% (seuil d'alerte avant règle prop firm)
