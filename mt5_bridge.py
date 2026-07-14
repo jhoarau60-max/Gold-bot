@@ -76,6 +76,35 @@ def health():
     })
 
 
+@app.route("/account", methods=["GET"])
+def account():
+    """Chiffres réels du compte MT5 — balance, equity, nombre de trades réellement exécutés."""
+    if request.headers.get("X-Token") != SECRET_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if not ensure_mt5():
+        return jsonify({"error": "MT5 non disponible"}), 500
+
+    info = mt5.account_info()
+    if info is None:
+        return jsonify({"error": "Pas de compte connecté"}), 500
+
+    from datetime import datetime as _dt
+    deals = mt5.history_deals_get(_dt(2020, 1, 1), _dt.now()) or []
+    # DEAL_ENTRY_OUT = fermeture de position → 1 deal = 1 trade réellement clôturé
+    trades_count = len([d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT and d.magic == MT5_MAGIC])
+
+    return jsonify({
+        "ok": True,
+        "login": info.login,
+        "server": info.server,
+        "balance": info.balance,
+        "equity": info.equity,
+        "profit": info.profit,
+        "trades_count": trades_count,
+    })
+
+
 @app.route("/order", methods=["POST"])
 def place_order():
     # Auth

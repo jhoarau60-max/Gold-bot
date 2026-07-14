@@ -735,6 +735,23 @@ def close_mt5_order(ticket: str) -> bool:
         return False
 
 
+def fetch_mt5_account() -> dict | None:
+    """Chiffres réels du compte MT5 (balance, equity, trades réellement exécutés) via le bridge."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN:
+        return None
+    try:
+        import httpx as _httpx
+        r = _httpx.get(
+            f"{MT5_BRIDGE_URL}/account",
+            headers={"X-Token": MT5_BRIDGE_TOKEN}, timeout=8,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        logger.warning(f"fetch_mt5_account: {e}")
+    return None
+
+
 def fetch_twelvedata_candles(ticker: str, count: int = 300, interval: str = "15min") -> pd.DataFrame | None:
     """Données temps réel Twelve Data → DataFrame compatible compute_indicators."""
     if not TWELVEDATA_KEY:
@@ -3246,19 +3263,33 @@ async def cmd_rapport(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
-    pct  = (data["capital"] - CAPITAL_INITIAL) / CAPITAL_INITIAL * 100
     all_closed = data.get("closed_trades", [])
     wins = [t for t in all_closed if t.get("pnl", 0) > 0]
     wr   = (len(wins) / len(all_closed) * 100) if all_closed else 0
-    msg  = (
-        f"💰 *État du Capital — GOLD BOT*\n\n"
+
+    mt5_acc = fetch_mt5_account()
+    if mt5_acc:
+        cap_cur      = mt5_acc["balance"]
+        trades_count = mt5_acc["trades_count"]
+        pnl_total    = round(cap_cur - CAPITAL_INITIAL, 2)
+        source_note  = "MT5 (compte réel)"
+    else:
+        cap_cur      = data["capital"]
+        trades_count = len(all_closed)
+        pnl_total    = data["total_pnl"]
+        source_note  = "local (bridge MT5 injoignable)"
+
+    pct = (cap_cur - CAPITAL_INITIAL) / CAPITAL_INITIAL * 100
+    msg = (
+        f"💰 *État du Capital — GOLD BOT*\n"
+        f"_Source : {source_note}_\n\n"
         f"Capital initial : `{CAPITAL_INITIAL:.2f} EUR`\n"
-        f"Capital actuel : `{data['capital']:.2f} EUR`\n"
+        f"Capital actuel : `{cap_cur:.2f} EUR`\n"
         f"Performance : `{pct:+.2f}%`\n"
-        f"P&L total : `{data['total_pnl']:+.2f} EUR`\n\n"
-        f"Trades fermés : `{len(all_closed)}`\n"
-        f"Taux de réussite global : `{wr:.1f}%`\n"
-        f"P&L aujourd'hui : `{data['daily_pnl']:+.2f} EUR`\n\n"
+        f"P&L total : `{pnl_total:+.2f} EUR`\n\n"
+        f"Trades réellement exécutés : `{trades_count}`\n"
+        f"Taux de réussite (local) : `{wr:.1f}%`\n"
+        f"P&L aujourd'hui (local) : `{data['daily_pnl']:+.2f} EUR`\n\n"
         f"🏅 Série victoires : `{data.get('win_streak',0)}`\n"
         f"📉 Série défaites : `{data.get('loss_streak',0)}`"
     )
@@ -3268,10 +3299,13 @@ async def cmd_propfirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Dashboard RaiseMyFund dans Telegram — mêmes 4 métriques que le site."""
     data = load_data()
 
+    mt5_acc    = fetch_mt5_account()
     cap_init   = CAPITAL_INITIAL         # 10 000$
-    cap_cur    = data["capital"]
-    daily_pnl  = data["daily_pnl"]
-    total_pnl  = data["total_pnl"]
+    cap_cur    = mt5_acc["balance"] if mt5_acc else data["capital"]
+    daily_pnl  = data["daily_pnl"]        # pas d'historique horodaté côté MT5 → reste local
+    total_pnl  = round(cap_cur - CAPITAL_INITIAL, 2) if mt5_acc else data["total_pnl"]
+    trades_count = mt5_acc["trades_count"] if mt5_acc else len(data.get("closed_trades", []))
+    source_note  = "MT5 (compte réel)" if mt5_acc else "local (bridge MT5 injoignable)"
 
     # Perte journalière (budget = 500$)
     daily_loss = min(daily_pnl, 0)       # valeur négative ou 0
@@ -3297,27 +3331,14 @@ async def cmd_propfirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rule45_pct  = min(daily_gain / 450.0 * 100, 100.0)
     rule45_ok   = daily_gain < 450.0
 
-    # Solde MT5 en temps réel (si bridge actif)
-    mt5_balance = None
-    if MT5_BRIDGE_URL and MT5_BRIDGE_TOKEN:
-        try:
-            import httpx as _httpx
-            r = _httpx.get(f"{MT5_BRIDGE_URL}/health",
-                           headers={"X-Token": MT5_BRIDGE_TOKEN}, timeout=5)
-            if r.status_code == 200:
-                mt5_balance = r.json().get("balance")
-        except Exception:
-            pass
-
     em_d  = "✅" if daily_ok  else "🛑"
     em_dd = "✅" if dd_ok     else "🛑"
     em_o  = "🏆" if obj_ok    else "🎯"
     em_45 = "✅" if rule45_ok else "⚠️"
 
-    mt5_line = f"\n💹 *Solde MT5 réel :* `{mt5_balance:.2f}$`" if mt5_balance else ""
-
     msg = (
         f"📊 *PROP FIRM — RaiseMyFund #1046385*\n"
+        f"_Source : {source_note}_\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{em_d}  *Perte journalière* : `{daily_used:.2f}$` / 500$\n"
         f"    Restant : `{daily_left:.2f}$` ({daily_pct:.1f}%) | Plancher : `{daily_floor:.2f}$`\n\n"
@@ -3328,8 +3349,7 @@ async def cmd_propfirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{em_45} *Règle 45%* : `{daily_gain:.2f}$` / 450$ aujourd'hui\n"
         f"    Utilisé : `{rule45_pct:.1f}%`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Capital bot : `{cap_cur:.2f}$` | P&L : `{total_pnl:+.2f}$`"
-        f"{mt5_line}"
+        f"💰 Capital : `{cap_cur:.2f}$` | P&L : `{total_pnl:+.2f}$` | Trades réels : `{trades_count}`"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
