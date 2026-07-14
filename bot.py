@@ -287,9 +287,9 @@ def get_instruments() -> dict:
     return WEEKDAY_INSTRUMENTS
 
 def is_trading_session() -> bool:
-    """ICT Kill Zones — Asian (0h-4h) + London (9h-12h) + NY (15h-18h) Paris."""
+    """ICT Kill Zones — Asian (2h-4h) + London (9h-12h) + NY (15h-18h) Paris."""
     h = datetime.now(TZ).hour
-    return (0 <= h < 4) or (9 <= h < 12) or (15 <= h < 18)
+    return (2 <= h < 4) or (9 <= h < 12) or (15 <= h < 18)
 
 def is_blackout_session() -> bool:
     """Blackout 21h-minuit Paris — entre fermeture NY et reprise Asian à minuit."""
