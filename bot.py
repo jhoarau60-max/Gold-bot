@@ -3267,6 +3267,37 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remet le capital à CAPITAL_INITIAL. Usage: /reset_capital ou /reset_capital 9958.94"""
+    if update.effective_user.id != JOHN_ID:
+        return
+    data = load_data()
+    new_cap = CAPITAL_INITIAL
+    if context.args:
+        try:
+            new_cap = float(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Montant invalide. Usage: `/reset_capital 9958.94`", parse_mode="Markdown")
+            return
+    old_cap = data["capital"]
+    data["capital"]       = new_cap
+    data["peak_capital"]  = new_cap
+    data["total_pnl"]     = 0.0
+    data["daily_pnl"]     = 0.0
+    data["daily_trades"]  = 0
+    data["win_streak"]    = 0
+    data["loss_streak"]   = 0
+    save_data(data)
+    await update.message.reply_text(
+        f"✅ *Capital réinitialisé*\n\n"
+        f"Ancien : `{old_cap:.2f}$`\n"
+        f"Nouveau : `{new_cap:.2f}$`\n"
+        f"P&L remis à zéro.",
+        parse_mode="Markdown"
+    )
+    logger.info(f"Capital reset par John: {old_cap:.2f} → {new_cap:.2f}")
+
+
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -3275,8 +3306,9 @@ async def main():
     app.add_handler(CommandHandler("rapport", cmd_rapport))
     app.add_handler(CommandHandler("capital", cmd_capital))
     app.add_handler(CommandHandler("signal",  cmd_signal))
-    app.add_handler(CommandHandler("myid",      cmd_myid))
-    app.add_handler(CommandHandler("wiki",      cmd_wiki))
+    app.add_handler(CommandHandler("myid",         cmd_myid))
+    app.add_handler(CommandHandler("reset_capital", cmd_reset_capital))
+    app.add_handler(CommandHandler("wiki",          cmd_wiki))
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
     app.add_handler(MessageHandler(filters.Regex(r'https?://\S+') & filters.ChatType.PRIVATE, cmd_wiki))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE & filters.CaptionRegex(r'^/wiki'), cmd_wiki))
