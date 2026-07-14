@@ -752,6 +752,60 @@ def fetch_mt5_account() -> dict | None:
     return None
 
 
+def sync_mt5_positions(data: dict) -> tuple[dict, list]:
+    """Détecte les positions fermées manuellement (ou par SL/TP natif) dans MT5
+    et les synchronise dans l'état local — évite le décalage capital/P&L."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN:
+        return data, []
+
+    tickets = [p["mt5_ticket"] for p in data["open_positions"] if p.get("mt5_ticket")]
+    if not tickets:
+        return data, []
+
+    try:
+        import httpx as _httpx
+        r = _httpx.post(
+            f"{MT5_BRIDGE_URL}/positions_status",
+            headers={"X-Token": MT5_BRIDGE_TOKEN, "Content-Type": "application/json"},
+            json={"tickets": tickets}, timeout=10,
+        )
+        if r.status_code != 200:
+            return data, []
+        status = r.json()
+    except Exception as e:
+        logger.warning(f"sync_mt5_positions: {e}")
+        return data, []
+
+    still_open, closed_now = [], []
+    for pos in data["open_positions"]:
+        ticket = pos.get("mt5_ticket")
+        info   = status.get(str(ticket)) if ticket else None
+        if info and not info.get("open", True):
+            pnl = info.get("profit", pos.get("pnl", 0.0))
+            pos["pnl"]         = round(pnl, 2)
+            pos["exit_time"]   = datetime.now(TZ).isoformat()
+            pos["exit_reason"] = "✋ Fermé manuellement (MT5)"
+            data["closed_trades"].append(pos)
+            data["daily_pnl"] += pnl
+            data["total_pnl"] += pnl
+            data["capital"]   += pnl
+            if pnl > 0:
+                data["win_streak"]  = data.get("win_streak", 0) + 1
+                data["loss_streak"] = 0
+            else:
+                data["loss_streak"] = data.get("loss_streak", 0) + 1
+                data["win_streak"]  = 0
+            closed_now.append(pos)
+            logger.info(f"Position {ticket} fermée manuellement dans MT5 — synchronisé (pnl={pnl:+.2f}$)")
+        else:
+            still_open.append(pos)
+
+    data["open_positions"] = still_open
+    if closed_now:
+        save_data(data)
+    return data, closed_now
+
+
 def fetch_twelvedata_candles(ticker: str, count: int = 300, interval: str = "15min") -> pd.DataFrame | None:
     """Données temps réel Twelve Data → DataFrame compatible compute_indicators."""
     if not TWELVEDATA_KEY:
@@ -2724,6 +2778,22 @@ async def trading_loop(app: Application):
                 data["learned_params"] = startup_learned
                 save_data(data)
                 startup_learned = {}
+
+            # Détecte les positions fermées manuellement dans MT5 (resynchronisation)
+            data, manually_closed = sync_mt5_positions(data)
+            for pos in manually_closed:
+                pnl_m = pos.get("pnl", 0.0)
+                em_m  = "✅" if pnl_m > 0 else "❌"
+                try:
+                    await app.bot.send_message(
+                        JOHN_ID,
+                        f"✋ *Position fermée manuellement dans MT5*\n"
+                        f"{em_m} {pos.get('ticker','')} — P&L réel : `{pnl_m:+.2f}$`\n"
+                        f"Capital synchronisé : `{data['capital']:.2f}$`",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
 
             # Exits toujours surveillés — même hors session (évite positions bloquées overnight)
             for ticker, info in instruments.items():

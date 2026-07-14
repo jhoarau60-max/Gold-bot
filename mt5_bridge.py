@@ -233,6 +233,36 @@ def close_order():
     return jsonify({"error": err}), 500
 
 
+@app.route("/positions_status", methods=["POST"])
+def positions_status():
+    """Vérifie si des tickets (positions ouvertes côté bot) sont toujours ouverts dans MT5,
+    ou ont été fermés (manuellement ou par SL/TP MT5 natif) — renvoie le profit réel si fermé."""
+    if request.headers.get("X-Token") != SECRET_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    if not ensure_mt5():
+        return jsonify({"error": "MT5 non disponible"}), 500
+
+    body    = request.json or {}
+    tickets = body.get("tickets", [])
+    result  = {}
+
+    for raw_ticket in tickets:
+        try:
+            ticket = int(raw_ticket)
+        except (TypeError, ValueError):
+            continue
+        pos = mt5.positions_get(ticket=ticket)
+        if pos:
+            result[str(ticket)] = {"open": True}
+        else:
+            deals  = mt5.history_deals_get(position=ticket) or []
+            profit = sum(d.profit + d.swap + d.commission for d in deals)
+            result[str(ticket)] = {"open": False, "profit": round(profit, 2)}
+
+    return jsonify(result)
+
+
 if __name__ == "__main__":
     logger.info("Initialisation MT5...")
     if not mt5.initialize(path=MT5_PATH):
