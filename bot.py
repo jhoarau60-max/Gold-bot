@@ -116,6 +116,7 @@ MAX_POSITION_HOURS  = 4      # timeout auto-close : scalping max 4h
 MAX_DAILY_TRADES    = 4      # max 4 trades/jour
 DRAWDOWN_ALERT      = 0.08   # 8% drawdown → risk réduit à 0.5% (seuil d'alerte avant règle prop firm)
 DRAWDOWN_PAUSE      = 0.10   # 10% drawdown → stop total (règle RaiseMyFund : max 10% drawdown global)
+CHALLENGE_OBJECTIVE = 0.10   # +10% = objectif Challenge 1 (1000$ sur 10k) → pause bot jusqu'à /resume_challenge
 ML_MIN_TRADES       = 50     # XGBoost activé après 50 trades labelisés
 UTC                 = pytz.utc
 
@@ -151,6 +152,7 @@ def _default_state() -> dict:
         "instrument_blacklist": {},
         "learned_params":       {},
         "drawdown_pause_until": None,
+        "challenge_paused":     False,
         "ml_auc":               0.0,
         "ml_active":            False,
     }
@@ -1340,6 +1342,11 @@ def open_trade(data: dict, ticker: str, direction: str,
         if not (lo <= price <= hi):
             logger.error(f"Prix aberrant {ticker}: {price:.2f} (attendu {lo}–{hi}) — trade annulé")
             return None
+
+    # Challenge terminé — objectif atteint, pause jusqu'à reprise manuelle (/resume_challenge)
+    if data.get("challenge_paused"):
+        logger.info("Challenge en pause (objectif atteint) — trade refusé")
+        return None
 
     # Daily loss basé sur le capital INITIAL (règle RaiseMyFund : 5% de 10 000$ = 500$ max/jour)
     if data["daily_pnl"] <= -(CAPITAL_INITIAL * MAX_DAILY_LOSS):
@@ -2783,6 +2790,32 @@ async def trading_loop(app: Application):
                 await asyncio.sleep(30 * 60)
                 continue
 
+            # Objectif Challenge atteint → pause jusqu'à reprise manuelle
+            if data.get("challenge_paused"):
+                logger.info("Challenge en pause — objectif atteint, attente /resume_challenge")
+                await asyncio.sleep(30 * 60)
+                continue
+
+            profit = data["capital"] - CAPITAL_INITIAL
+            objective = CAPITAL_INITIAL * CHALLENGE_OBJECTIVE
+            if profit >= objective:
+                data["challenge_paused"] = True
+                save_data(data)
+                try:
+                    await app.bot.send_message(
+                        JOHN_ID,
+                        f"🏆 *GOLD-E — Objectif Challenge atteint !*\n\n"
+                        f"Profit : `{profit:.2f}$` ≥ objectif `{objective:.2f}$`\n"
+                        f"Capital : `{data['capital']:.2f}$`\n\n"
+                        f"Bot en pause — aucun nouveau trade.\n"
+                        f"Envoie `/resume_challenge` quand tu veux relancer pour le Challenge 2.",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(30 * 60)
+                continue
+
             # Macro blackout
             if is_macro_blackout():
                 logger.info("Macro blackout — annonce haute-impact imminente")
@@ -3368,6 +3401,20 @@ async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Capital sync par John: {old_cap:.2f} → {new_cap:.2f} (total_pnl={real_pnl:.2f})")
 
 
+async def cmd_resume_challenge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Relance le bot après pause objectif atteint (passage au Challenge 2)."""
+    if update.effective_user.id != JOHN_ID:
+        return
+    data = load_data()
+    data["challenge_paused"] = False
+    save_data(data)
+    await update.message.reply_text(
+        "✅ *Challenge relancé*\n\nTrading repris — bonne chance pour la suite.",
+        parse_mode="Markdown"
+    )
+    logger.info("Challenge repris manuellement par John (challenge_paused=False)")
+
+
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -3378,6 +3425,7 @@ async def main():
     app.add_handler(CommandHandler("signal",  cmd_signal))
     app.add_handler(CommandHandler("myid",         cmd_myid))
     app.add_handler(CommandHandler("reset_capital", cmd_reset_capital))
+    app.add_handler(CommandHandler("resume_challenge", cmd_resume_challenge))
     app.add_handler(CommandHandler("propfirm",      cmd_propfirm))
     app.add_handler(CommandHandler("wiki",          cmd_wiki))
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
