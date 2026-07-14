@@ -41,9 +41,11 @@ LOT_DIVISOR = {
 MAX_LOT_SIZE = 0.03  # cap prop firm RaiseMyFund — jamais plus de 0.03 lots
 
 
+MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+
 def ensure_mt5():
-    """Initialise MT5 si pas encore fait."""
-    if not mt5.initialize():
+    """Initialise MT5 si pas encore fait — pointe vers RaiseGlobalSA (pas OANDA)."""
+    if not mt5.initialize(path=MT5_PATH):
         logger.error(f"MT5 initialize() échoué: {mt5.last_error()}")
         return False
     return True
@@ -204,7 +206,7 @@ def close_order():
 
 if __name__ == "__main__":
     logger.info("Initialisation MT5...")
-    if not mt5.initialize():
+    if not mt5.initialize(path=MT5_PATH):
         logger.error(f"MT5 non disponible: {mt5.last_error()}")
         logger.error("Assure-toi que MT5 est ouvert et connecté à RaiseGlobalSA-live")
         exit(1)
