@@ -67,6 +67,12 @@ OANDA_GRAN_MAP   = {"15m": "M15", "1h": "H1"}
 OANDA_COUNT_MAP  = {("5d","15m"): 480, ("2d","15m"): 192, ("10d","1h"): 240, ("5d","1h"): 120}
 logger.info(f"OANDA configuré: account={bool(OANDA_ACCOUNT_ID)} token={bool(OANDA_TOKEN)} practice={OANDA_PRACTICE}")
 
+# MT5 Bridge (PC Windows local avec MetaTrader5)
+MT5_BRIDGE_URL   = ENV.get("MT5_BRIDGE_URL", "").rstrip("/")   # ex: https://xxxx.trycloudflare.com
+MT5_BRIDGE_TOKEN = ENV.get("MT5_BRIDGE_TOKEN", "")
+MT5_INST_MAP     = {"XAUUSD=X": "XAUUSD", "XAGUSD=X": "XAGUSD"}
+logger.info(f"MT5 Bridge configuré: url={bool(MT5_BRIDGE_URL)} token={bool(MT5_BRIDGE_TOKEN)}")
+
 TWELVEDATA_KEY   = ENV.get("TWELVEDATA_KEY", "")
 TD_INST_MAP      = {"XAUUSD=X": "XAU/USD", "XAGUSD=X": "XAG/USD"}
 TD_INTERVAL_MAP  = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day"}
@@ -674,6 +680,55 @@ def close_oanda_trade(trade_id: str) -> bool:
         return ok
     except Exception as e:
         logger.error(f"close_oanda_trade {trade_id}: {e}")
+        return False
+
+
+def place_mt5_order(ticker: str, direction: str, qty: float, sl: float, tp: float) -> str | None:
+    """Passe un ordre via le bridge MT5 local. Retourne le ticket MT5 (str) ou None."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN:
+        return None
+    if ticker not in MT5_INST_MAP:
+        return None
+    try:
+        import httpx as _httpx
+        r = _httpx.post(
+            f"{MT5_BRIDGE_URL}/order",
+            headers={"X-Token": MT5_BRIDGE_TOKEN, "Content-Type": "application/json"},
+            json={"action": direction, "ticker": ticker, "qty": qty, "sl": sl, "tp": tp},
+            timeout=20,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            ticket = str(data.get("ticket", ""))
+            logger.info(f"MT5 ordre OK: {ticker} {direction} {data.get('volume')} lots → ticket {ticket}")
+            return ticket
+        logger.error(f"MT5 bridge ordre échoué: {r.status_code} {r.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"place_mt5_order {ticker}: {e}")
+        return None
+
+
+def close_mt5_order(ticket: str) -> bool:
+    """Ferme une position MT5 via le bridge."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN or not ticket:
+        return False
+    try:
+        import httpx as _httpx
+        r = _httpx.post(
+            f"{MT5_BRIDGE_URL}/close",
+            headers={"X-Token": MT5_BRIDGE_TOKEN, "Content-Type": "application/json"},
+            json={"ticket": int(ticket)},
+            timeout=20,
+        )
+        ok = r.status_code == 200
+        if ok:
+            logger.info(f"MT5 ticket {ticket} fermé")
+        else:
+            logger.error(f"MT5 close {ticket}: {r.status_code} {r.text[:100]}")
+        return ok
+    except Exception as e:
+        logger.error(f"close_mt5_order {ticket}: {e}")
         return False
 
 
@@ -1332,14 +1387,26 @@ def open_trade(data: dict, ticker: str, direction: str,
         "entry_time":       datetime.now(TZ).isoformat(),
         "pnl":              0.0,
         "oanda_id":         None,
+        "mt5_ticket":       None,
         "atr_entry":        atr,
         "sl_mult":          sl_mult,
         "trail_peak":       price,
         "trailing_active":  False,
     }
 
-    # Ordre réel OANDA (XAU/XAG uniquement)
-    if ticker in OANDA_INST_MAP and OANDA_TOKEN:
+    # Ordre réel : MT5 Bridge en priorité, fallback OANDA
+    if ticker in MT5_INST_MAP and MT5_BRIDGE_URL:
+        mt5_ticket = place_mt5_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
+        if mt5_ticket:
+            pos["mt5_ticket"] = mt5_ticket
+            logger.info(f"Ordre MT5 confirmé: ticket={mt5_ticket}")
+        else:
+            logger.warning(f"Ordre MT5 échoué pour {ticker} — tentative OANDA fallback")
+            if ticker in OANDA_INST_MAP and OANDA_TOKEN:
+                oanda_id = place_oanda_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
+                if oanda_id:
+                    pos["oanda_id"] = oanda_id
+    elif ticker in OANDA_INST_MAP and OANDA_TOKEN:
         oanda_id = place_oanda_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
         if oanda_id:
             pos["oanda_id"] = oanda_id
