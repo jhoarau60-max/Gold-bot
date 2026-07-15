@@ -2362,6 +2362,9 @@ async def morning_report(app: Application):
     mode   = "Week-end — Mode CRYPTO 🪙" if now.weekday() >= 5 else "Semaine — Mode MÉTAUX 🥇🥈"
     pct    = (data["capital"] - CAPITAL_INITIAL) / CAPITAL_INITIAL * 100
 
+    mt5_acc      = fetch_mt5_account()
+    trades_total = mt5_acc["trades_count"] if mt5_acc else len(data["closed_trades"])
+
     msg = (
         f"🌅 *GOLD BOT — Rapport du Matin*\n"
         f"📅 {now.strftime('%A %d %B %Y')} | {mode}\n\n"
@@ -2370,7 +2373,7 @@ async def morning_report(app: Application):
         f"━━━━━━━━━━━━━━━\n"
         f"💰 Capital : `{data['capital']:.2f} EUR`\n"
         f"📈 Performance : `{pct:+.2f}%`\n"
-        f"🔄 Trades totaux : `{len(data['closed_trades'])}`"
+        f"🔄 Trades totaux (MT5 réel) : `{trades_total}`"
     )
     try:
         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
@@ -2398,6 +2401,9 @@ async def evening_report(app: Application):
     all_wins   = [t for t in all_closed if t.get("pnl", 0) > 0]
     global_wr  = (len(all_wins) / len(all_closed) * 100) if all_closed else 0
 
+    mt5_acc      = fetch_mt5_account()
+    trades_total = mt5_acc["trades_count"] if mt5_acc else len(all_closed)
+
     msg = (
         f"🌙 *GOLD BOT — Rapport du Soir*\n"
         f"📅 {now.strftime('%d/%m/%Y')}\n\n"
@@ -2412,7 +2418,7 @@ async def evening_report(app: Application):
         f"💰 Capital actuel : `{data['capital']:.2f} EUR`\n"
         f"📈 Performance totale : `{pct:+.2f}%`\n"
         f"🎯 Taux réussite global : `{global_wr:.1f}%`\n"
-        f"🔄 Trades totaux : `{len(all_closed)}`\n"
+        f"🔄 Trades totaux (MT5 réel) : `{trades_total}`\n"
         f"🏅 Série victoires : `{data.get('win_streak',0)}`"
     )
     try:
