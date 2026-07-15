@@ -1479,18 +1479,18 @@ def open_trade(data: dict, ticker: str, direction: str,
         "trailing_active":  False,
     }
 
-    # Ordre réel : MT5 Bridge en priorité, fallback OANDA
-    if ticker in MT5_INST_MAP and MT5_BRIDGE_URL:
+    # Ordre réel : XAU/XAG passent UNIQUEMENT par MT5 (compte réel RaiseMyFund) —
+    # pas de fallback OANDA, sinon le trade est enregistré comme réel alors qu'il ne l'est pas.
+    if ticker in MT5_INST_MAP:
+        if not MT5_BRIDGE_URL:
+            logger.warning(f"Bridge MT5 non configuré — signal {ticker} ignoré (pas de trade fantôme)")
+            return None
         mt5_ticket = place_mt5_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
-        if mt5_ticket:
-            pos["mt5_ticket"] = mt5_ticket
-            logger.info(f"Ordre MT5 confirmé: ticket={mt5_ticket}")
-        else:
-            logger.warning(f"Ordre MT5 échoué pour {ticker} — tentative OANDA fallback")
-            if ticker in OANDA_INST_MAP and OANDA_TOKEN:
-                oanda_id = place_oanda_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
-                if oanda_id:
-                    pos["oanda_id"] = oanda_id
+        if not mt5_ticket:
+            logger.warning(f"Ordre MT5 échoué pour {ticker} — bridge injoignable, signal ignoré (pas de fallback OANDA)")
+            return None
+        pos["mt5_ticket"] = mt5_ticket
+        logger.info(f"Ordre MT5 confirmé: ticket={mt5_ticket}")
     elif ticker in OANDA_INST_MAP and OANDA_TOKEN:
         oanda_id = place_oanda_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
         if oanda_id:
