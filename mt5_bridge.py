@@ -233,6 +233,48 @@ def close_order():
     return jsonify({"error": err}), 500
 
 
+@app.route("/modify", methods=["POST"])
+def modify_position():
+    """Modifie le SL/TP d'une position ouverte (trailing stop du bot)."""
+    if request.headers.get("X-Token") != SECRET_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data   = request.json or {}
+    ticket = int(data.get("ticket", 0))
+    sl     = float(data.get("sl", 0) or 0)
+    tp_raw = data.get("tp")
+
+    if ticket <= 0 or sl <= 0:
+        return jsonify({"error": f"paramètres invalides ticket={ticket} sl={sl}"}), 400
+
+    if not ensure_mt5():
+        return jsonify({"error": "MT5 non disponible"}), 500
+
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        return jsonify({"error": f"Position {ticket} introuvable"}), 404
+
+    pos    = positions[0]
+    digits = mt5.symbol_info(pos.symbol).digits
+
+    request_dict = {
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "symbol":   pos.symbol,
+        "position": ticket,
+        "sl":       round(sl, digits),
+        "tp":       round(float(tp_raw), digits) if tp_raw else pos.tp,
+    }
+
+    result = mt5.order_send(request_dict)
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        logger.info(f"Position {ticket} modifiée: SL={sl} TP={tp_raw or pos.tp}")
+        return jsonify({"ok": True})
+
+    err = result.comment if result else str(mt5.last_error())
+    logger.error(f"Modification {ticket} échouée: {err}")
+    return jsonify({"error": err, "retcode": result.retcode if result else None}), 500
+
+
 @app.route("/positions_status", methods=["POST"])
 def positions_status():
     """Vérifie si des tickets (positions ouvertes côté bot) sont toujours ouverts dans MT5,

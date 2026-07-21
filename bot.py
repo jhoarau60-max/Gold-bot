@@ -112,7 +112,7 @@ TICKER_TO_BOT = {
 RISK_PER_TRADE      = 0.01   # 1 % du capital par trade
 MAX_DAILY_LOSS      = 0.045  # 4.5% de perte max par jour = 450$ sur 10k (marge de 50$ sous limite RaiseMyFund 500$/jour)
 MAX_DAILY_GAIN      = 450.0  # cap gain journalier — règle des 45% RaiseMyFund (1 jour ≤ 45% de l'objectif 1000$)
-MAX_POSITION_HOURS  = 4      # timeout auto-close : scalping max 4h
+MAX_POSITION_HOURS  = 6      # timeout auto-close : intraday max 6h (cohérent avec TP ~3×ATR)
 MAX_DAILY_TRADES    = 4      # max 4 trades/jour
 DRAWDOWN_ALERT      = 0.08   # 8% drawdown → risk réduit à 0.5% (seuil d'alerte avant règle prop firm)
 DRAWDOWN_PAUSE      = 0.10   # 10% drawdown → stop total (règle RaiseMyFund : max 10% drawdown global)
@@ -172,7 +172,7 @@ def load_data_from_supabase() -> dict:
             base["daily_pnl"]    = float(s.get("daily_pnl") or 0)
             base["daily_trades"] = int(s.get("daily_trades") or 0)
             base["win_streak"]   = int(s.get("win_streak") or 0)
-            base["loss_streak"]  = 0  # Reset au démarrage — pertes d'avant redeploy ne bloquent pas
+            base["loss_streak"]  = int(s.get("loss_streak") or 0)  # Persisté — un redeploy n'annule plus la protection 3 pertes
             base["last_reset"]   = str(s.get("last_reset") or base["last_reset"])[:10]
 
         # Positions ouvertes — ferme automatiquement les stale (> MAX_POSITION_HOURS)
@@ -183,6 +183,13 @@ def load_data_from_supabase() -> dict:
             opened_at = row.get("opened_at") or ""
             # Position trop ancienne : fermer dans Supabase, ne pas réimporter
             if opened_at and opened_at < stale_cutoff:
+                # Fermer aussi la position RÉELLE dans MT5 (sinon position orpheline sur le compte)
+                _stale_ticket = row.get("mt5_ticket")
+                if _stale_ticket:
+                    if close_mt5_order(str(_stale_ticket)):
+                        logger.info(f"Position stale {_stale_ticket} fermée dans MT5")
+                    else:
+                        logger.warning(f"Position stale {_stale_ticket} — fermeture MT5 échouée, vérifier manuellement !")
                 try:
                     sb_client.table("trade_history").update({
                         "status":     "closed",
@@ -206,6 +213,7 @@ def load_data_from_supabase() -> dict:
                     "entry_time":  str(row.get("opened_at") or ""),
                     "pnl":         0.0,
                     "supabase_id": row["id"],
+                    "mt5_ticket":  str(row["mt5_ticket"]) if row.get("mt5_ticket") else None,
                 })
 
         # Historique trades fermés — nourrit adaptive_params + XGBoost au redémarrage
@@ -327,7 +335,7 @@ def get_dxy_direction() -> str:
     """UP si DXY monte (bearish XAU), DOWN si DXY baisse (bullish XAU). Cache 30min."""
     global _dxy_cache
     now = datetime.now(UTC)
-    if _dxy_cache["fetched_at"] and (now - _dxy_cache["fetched_at"]).seconds < 1800:
+    if _dxy_cache["fetched_at"] and (now - _dxy_cache["fetched_at"]).total_seconds() < 1800:
         return _dxy_cache["direction"]
     try:
         df = yf.download("DX-Y.NYB", period="2d", interval="1h", progress=False, auto_adjust=True)
@@ -354,7 +362,7 @@ def fetch_macro_calendar() -> list:
     """ForexFactory calendar — high-impact events uniquement. Cache 4h."""
     global _macro_cache
     now = datetime.now(UTC)
-    if _macro_cache["fetched_at"] and (now - _macro_cache["fetched_at"]).seconds < 14400:
+    if _macro_cache["fetched_at"] and (now - _macro_cache["fetched_at"]).total_seconds() < 14400:
         return _macro_cache["events"]
     try:
         import httpx
@@ -563,8 +571,11 @@ def adaptive_params(data: dict) -> dict:
     learned   = data.get("learned_params", {})
     prev_mode = data.get("adaptive_mode", "démarrage")
 
+    # TP ≈ 2× SL (RR 1:2), atteignable dans la fenêtre MAX_POSITION_HOURS —
+    # les anciens tp_mult 5.3–7.2 n'étaient presque jamais atteints avant le timeout.
+    # Risque ≤ 1% par défaut : 4 trades/jour × 1% = 4% < limite daily loss 4.5% RaiseMyFund.
     if len(recent) < 20:
-        base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 2.632, "tp_mult": 5.343, "mode": "démarrage"}
+        base = {"threshold": 5, "risk_per_trade": 0.01, "sl_mult": 1.5, "tp_mult": 3.0, "mode": "démarrage"}
     else:
         wr = sum(1 for t in recent if t.get("pnl", 0) > 0) / len(recent)
         # Hystérésis : seuils plus larges pour ENTRER dans un mode extrême que pour en SORTIR —
@@ -573,11 +584,11 @@ def adaptive_params(data: dict) -> dict:
         entering_high = wr > 0.70 if prev_mode != "sélectif"     else wr > 0.60
 
         if entering_low:
-            base = {"threshold": 5, "risk_per_trade": 0.015, "sl_mult": 1.8, "tp_mult": 7.2, "mode": "récupération"}
+            base = {"threshold": 6, "risk_per_trade": 0.005, "sl_mult": 1.8, "tp_mult": 3.6, "mode": "récupération"}
         elif entering_high:
-            base = {"threshold": 5, "risk_per_trade": 0.025, "sl_mult": 1.3, "tp_mult": 5.2, "mode": "sélectif"}
+            base = {"threshold": 5, "risk_per_trade": 0.015, "sl_mult": 1.3, "tp_mult": 2.6, "mode": "sélectif"}
         else:
-            base = {"threshold": 5, "risk_per_trade": 0.02, "sl_mult": 2.632, "tp_mult": 5.343, "mode": "normal"}
+            base = {"threshold": 5, "risk_per_trade": 0.01, "sl_mult": 1.5, "tp_mult": 3.0, "mode": "normal"}
 
         if base["mode"] != prev_mode:
             data.setdefault("mode_history", []).append({
@@ -686,8 +697,8 @@ def close_oanda_trade(trade_id: str) -> bool:
         return False
 
 
-def place_mt5_order(ticker: str, direction: str, qty: float, sl: float, tp: float) -> str | None:
-    """Passe un ordre via le bridge MT5 local. Retourne le ticket MT5 (str) ou None."""
+def place_mt5_order(ticker: str, direction: str, qty: float, sl: float, tp: float) -> tuple[str, float] | None:
+    """Passe un ordre via le bridge MT5 local. Retourne (ticket, lots réels exécutés) ou None."""
     if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN:
         return None
     if ticker not in MT5_INST_MAP:
@@ -703,13 +714,65 @@ def place_mt5_order(ticker: str, direction: str, qty: float, sl: float, tp: floa
         if r.status_code == 200:
             data = r.json()
             ticket = str(data.get("ticket", ""))
-            logger.info(f"MT5 ordre OK: {ticker} {direction} {data.get('volume')} lots → ticket {ticket}")
-            return ticket
+            lots   = float(data.get("volume") or 0)
+            logger.info(f"MT5 ordre OK: {ticker} {direction} {lots} lots → ticket {ticket}")
+            return ticket, lots
         logger.error(f"MT5 bridge ordre échoué: {r.status_code} {r.text[:200]}")
         return None
     except Exception as e:
         logger.error(f"place_mt5_order {ticker}: {e}")
         return None
+
+
+# Taille de contrat MT5 : 1 lot XAUUSD = 100 oz, 1 lot XAGUSD = 5000 oz
+MT5_CONTRACT_SIZE = {"XAUUSD=X": 100.0, "XAGUSD=X": 5000.0}
+
+def real_qty(pos: dict) -> float:
+    """Quantité réellement exécutée dans MT5 (lots × taille contrat).
+    Fallback sur la qty théorique si real_lots absent (trades pré-fix ou hors MT5)."""
+    lots = pos.get("real_lots")
+    if lots:
+        return float(lots) * MT5_CONTRACT_SIZE.get(pos.get("ticker", ""), 100.0)
+    return float(pos.get("qty", 0))
+
+
+def mt5_position_status(ticket: str) -> dict | None:
+    """Statut d'un ticket MT5 : {'open': True} ou {'open': False, 'profit': x}.
+    None si bridge injoignable."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN or not ticket:
+        return None
+    try:
+        import httpx as _httpx
+        r = _httpx.post(
+            f"{MT5_BRIDGE_URL}/positions_status",
+            headers={"X-Token": MT5_BRIDGE_TOKEN, "Content-Type": "application/json"},
+            json={"tickets": [ticket]}, timeout=10,
+        )
+        if r.status_code == 200:
+            return r.json().get(str(ticket))
+    except Exception as e:
+        logger.warning(f"mt5_position_status {ticket}: {e}")
+    return None
+
+
+def modify_mt5_sl(ticket: str, sl: float, tp: float | None = None) -> bool:
+    """Pousse un nouveau SL (trailing) vers la position MT5 réelle."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN or not ticket:
+        return False
+    try:
+        import httpx as _httpx
+        r = _httpx.post(
+            f"{MT5_BRIDGE_URL}/modify",
+            headers={"X-Token": MT5_BRIDGE_TOKEN, "Content-Type": "application/json"},
+            json={"ticket": int(ticket), "sl": sl, "tp": tp}, timeout=10,
+        )
+        if r.status_code == 200:
+            return True
+        logger.warning(f"MT5 modify {ticket}: {r.status_code} {r.text[:100]}")
+        return False
+    except Exception as e:
+        logger.warning(f"modify_mt5_sl {ticket}: {e}")
+        return False
 
 
 def close_mt5_order(ticket: str) -> bool:
@@ -854,9 +917,11 @@ def fetch_twelvedata_candles(ticker: str, count: int = 300, interval: str = "15m
         return None
 
 
+# Spot uniquement — GC=F/SI=F (futures) retirés : basis de plusieurs $ vs les quotes
+# spot du broker → SL/TP décalés. Si TD + OANDA + yfinance spot échouent, on skip le cycle.
 TICKER_FALLBACKS = {
-    "XAUUSD=X": ["GC=F", "XAUUSD=X"],
-    "XAGUSD=X": ["SI=F", "XAGUSD=X"],
+    "XAUUSD=X": ["XAUUSD=X"],
+    "XAGUSD=X": ["XAGUSD=X"],
 }
 
 def _is_rate_limit(e: Exception) -> bool:
@@ -1200,10 +1265,10 @@ def _detect_ifvg(df: pd.DataFrame, lookback: int = 50) -> tuple[bool, bool, str]
     return False, False, ""
 
 # ── SCORE DE SIGNAL (système de notation multi-critères) ───────────────────────
-def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
+def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | None, int, list[str]]:
     """
     Retourne (direction, score, raisons[])
-    Score >= 4 sur 7 = signal valide
+    threshold = score minimum pour valider un signal (adaptatif : modes + Gemini)
     Inspiré du système de validation multiple de Stan Druckenmiller
     """
     if len(df) < 50:
@@ -1346,7 +1411,8 @@ def compute_signal_score(df: pd.DataFrame) -> tuple[str | None, int, list[str]]:
     if ifvg_bull: score_buy  += 2; reasons_buy.append(ifvg_desc)
     if ifvg_bear: score_sell += 2; reasons_sell.append(ifvg_desc)
 
-    threshold = 5  # ICT confluence : OTE + FVG/OB + confirmations techniques
+    # threshold passé en paramètre (adaptive_params) — ICT confluence : OTE + FVG/OB + confirmations
+    threshold = max(3, min(6, int(threshold)))
 
     # Filtre ADX obligatoire — pas de trade en consolidation (ADX < 22)
     if adx < 20.7:
@@ -1445,7 +1511,7 @@ def open_trade(data: dict, ticker: str, direction: str,
             return None
 
     sl_mult = params["sl_mult"]        if params else 1.5
-    tp_mult = params["tp_mult"]        if params else 3.75
+    tp_mult = params["tp_mult"]        if params else 3.0
     risk    = params["risk_per_trade"] if params else RISK_PER_TRADE
 
     # GOLD-E : drawdown 12% → sizing réduit à 0.5%
@@ -1485,12 +1551,20 @@ def open_trade(data: dict, ticker: str, direction: str,
         if not MT5_BRIDGE_URL:
             logger.warning(f"Bridge MT5 non configuré — signal {ticker} ignoré (pas de trade fantôme)")
             return None
-        mt5_ticket = place_mt5_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
-        if not mt5_ticket:
+        mt5_res = place_mt5_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
+        if not mt5_res:
             logger.warning(f"Ordre MT5 échoué pour {ticker} — bridge injoignable, signal ignoré (pas de fallback OANDA)")
             return None
+        mt5_ticket, real_lots = mt5_res
         pos["mt5_ticket"] = mt5_ticket
-        logger.info(f"Ordre MT5 confirmé: ticket={mt5_ticket}")
+        pos["real_lots"]  = real_lots
+        r_qty = real_lots * MT5_CONTRACT_SIZE.get(ticker, 100.0)
+        if r_qty > 0 and qty > 0 and abs(r_qty - qty) / qty > 0.2:
+            logger.warning(
+                f"Volume MT5 ajusté (vol_min/cap lots) : théorique {qty:.4f} oz → réel {r_qty:.4f} oz "
+                f"— risque réel ≈ {(data['capital'] * risk) * (r_qty / qty):.2f}$ au lieu de {data['capital'] * risk:.2f}$"
+            )
+        logger.info(f"Ordre MT5 confirmé: ticket={mt5_ticket} ({real_lots} lots = {r_qty:.2f} oz)")
     elif ticker in OANDA_INST_MAP and OANDA_TOKEN:
         oanda_id = place_oanda_order(ticker, direction, qty, round(sl, 5), round(tp, 5))
         if oanda_id:
@@ -1503,19 +1577,27 @@ def open_trade(data: dict, ticker: str, direction: str,
     save_data(data)
 
     if sb_client:
+        row = {
+            "bot":         TICKER_TO_BOT.get(ticker, "gold"),
+            "symbol":      ticker,
+            "direction":   direction,
+            "price_entry": round(price, 5),
+            "sl":          round(sl, 5),
+            "tp":          round(tp, 5),
+            "qty":         round(qty, 6),
+            "score":       score,
+            "status":      "open",
+            "opened_at":   datetime.now(TZ).isoformat(),
+        }
         try:
-            res = sb_client.table("trade_history").insert({
-                "bot":         TICKER_TO_BOT.get(ticker, "gold"),
-                "symbol":      ticker,
-                "direction":   direction,
-                "price_entry": round(price, 5),
-                "sl":          round(sl, 5),
-                "tp":          round(tp, 5),
-                "qty":         round(qty, 6),
-                "score":       score,
-                "status":      "open",
-                "opened_at":   datetime.now(TZ).isoformat(),
-            }).execute()
+            # mt5_ticket permet de fermer la position réelle après un restart Railway
+            # (fallback sans le champ si la colonne n'existe pas encore dans Supabase)
+            try:
+                res = sb_client.table("trade_history").insert(
+                    {**row, "mt5_ticket": pos.get("mt5_ticket")}
+                ).execute()
+            except Exception:
+                res = sb_client.table("trade_history").insert(row).execute()
             if res.data:
                 pos["supabase_id"] = res.data[0]["id"]
                 save_data(data)
@@ -1531,17 +1613,18 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
             remaining.append(pos)
             continue
 
+        q = real_qty(pos)  # quantité réellement exécutée MT5 (pas la théorique)
         if pos["direction"] == "BUY":
             hit_sl = price <= pos["sl"]
             hit_tp = price >= pos["tp"]
             # Fermeture au prix SL/TP réel (évite slippage gap)
             exit_price = pos["sl"] if hit_sl else (pos["tp"] if hit_tp else price)
-            pnl = (exit_price - pos["entry_price"]) * pos["qty"]
+            pnl = (exit_price - pos["entry_price"]) * q
         else:
             hit_sl = price >= pos["sl"]
             hit_tp = price <= pos["tp"]
             exit_price = pos["sl"] if hit_sl else (pos["tp"] if hit_tp else price)
-            pnl = (pos["entry_price"] - exit_price) * pos["qty"]
+            pnl = (pos["entry_price"] - exit_price) * q
 
         pos["pnl"] = round(pnl, 2)
 
@@ -1558,6 +1641,31 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
 
         if hit_sl or hit_tp or timeout_hit:
             reason = "✅ Take Profit" if hit_tp else ("⏰ Timeout" if timeout_hit else "🛑 Stop Loss")
+
+            # ── FERMETURE RÉELLE MT5 — la position doit être fermée sur le compte
+            # avant d'être fermée localement, sinon position fantôme (bug critique #1)
+            ticket = pos.get("mt5_ticket")
+            if ticket:
+                status = mt5_position_status(ticket)
+                if status is None:
+                    # Bridge injoignable — on NE ferme PAS localement, retry au prochain cycle
+                    logger.warning(f"Bridge MT5 injoignable — fermeture {ticket} reportée ({reason})")
+                    remaining.append(pos)
+                    continue
+                if status.get("open", False):
+                    if not close_mt5_order(ticket):
+                        logger.warning(f"Fermeture MT5 {ticket} échouée — retry au prochain cycle")
+                        remaining.append(pos)
+                        continue
+                    # Laisser le deal s'enregistrer puis lire le profit réel
+                    import time as _time
+                    _time.sleep(1.5)
+                    status = mt5_position_status(ticket) or {}
+                # Profit réel MT5 (inclut swap + commission) = source de vérité (bug critique #2)
+                if status and not status.get("open", True) and status.get("profit") is not None:
+                    pnl = float(status["profit"])
+                    pos["pnl"] = round(pnl, 2)
+
             pos["exit_price"]  = round(exit_price if (hit_sl or hit_tp) else price, 5)
             pos["exit_time"]   = datetime.now(TZ).isoformat()
             pos["exit_reason"] = reason
@@ -1607,6 +1715,9 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
                         new_sl = pos["trail_peak"] - trail_dist
                         if new_sl > pos["sl"]:
                             pos["sl"] = round(new_sl, 5)
+                            # Sync SL réel MT5 — sinon le trailing n'existe que localement
+                            if pos.get("mt5_ticket"):
+                                modify_mt5_sl(pos["mt5_ticket"], pos["sl"], pos.get("tp"))
                 else:
                     if price < pos.get("trail_peak", price):
                         pos["trail_peak"] = price
@@ -1617,6 +1728,9 @@ def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
                         new_sl = pos["trail_peak"] + trail_dist
                         if new_sl < pos["sl"]:
                             pos["sl"] = round(new_sl, 5)
+                            # Sync SL réel MT5 — sinon le trailing n'existe que localement
+                            if pos.get("mt5_ticket"):
+                                modify_mt5_sl(pos["mt5_ticket"], pos["sl"], pos.get("tp"))
             if sb_client and "supabase_id" in pos:
                 try:
                     sb_client.table("trade_history").update({
@@ -2773,6 +2887,16 @@ async def trading_loop(app: Application):
     startup_learned = load_learned_params()
     if startup_learned:
         logger.info(f"Params Gemini restaurés au démarrage: {startup_learned}")
+    # Params Optuna (backtest.py → params_optuna.json, commité avec le code).
+    # Gemini/Supabase reste prioritaire ; bornés ensuite dans adaptive_params.
+    try:
+        if os.path.exists("params_optuna.json"):
+            with open("params_optuna.json") as f:
+                _opt = json.load(f)
+            startup_learned = {**_opt, **startup_learned}
+            logger.info(f"Params Optuna chargés: {_opt}")
+    except Exception as e:
+        logger.warning(f"params_optuna.json illisible: {e}")
 
     while True:
         try:
@@ -2780,6 +2904,15 @@ async def trading_loop(app: Application):
             instruments = get_instruments()
             cycle += 1
             hourly_lines = []
+
+            # Reset journalier robuste — ne dépend plus du morning_report (qui peut sauter)
+            today = datetime.now(TZ).strftime("%Y-%m-%d")
+            if data.get("last_reset") != today:
+                logger.info(f"Reset journalier: daily_pnl {data.get('daily_pnl', 0):.2f} → 0, daily_trades {data.get('daily_trades', 0)} → 0")
+                data["daily_pnl"]    = 0.0
+                data["daily_trades"] = 0
+                data["last_reset"]   = today
+                save_data(data)
             if startup_learned and not data.get("learned_params"):
                 data["learned_params"] = startup_learned
                 save_data(data)
@@ -2854,9 +2987,9 @@ async def trading_loop(app: Application):
                 await asyncio.sleep(30 * 60)
                 continue
 
-            # Blackout 21h-00h UTC — gap asiatique
+            # Blackout 21h-minuit Paris — entre fermeture NY et reprise Asian
             if is_blackout_session():
-                logger.info("Blackout 21h-00h UTC — aucun nouveau trade")
+                logger.info("Blackout 21h-minuit Paris — aucun nouveau trade")
                 await asyncio.sleep(30 * 60)
                 continue
 
@@ -2965,7 +3098,7 @@ async def trading_loop(app: Application):
                     continue
 
                 pattern              = detect_candlestick_pattern(df)
-                direction, score, reasons = compute_signal_score(df)
+                direction, score, reasons = compute_signal_score(df, threshold=params.get("threshold", 5))
 
                 rsi_val = float(df["RSI"].iloc[-1])
                 adx_val = float(df["ADX"].iloc[-1])
@@ -3071,8 +3204,16 @@ async def trading_loop(app: Application):
                 if direction:
                     feats_final = collect_features(df, data, direction, dxy_dir)
                     feats_final["score"] = score
-                    # Sync capital depuis Supabase avant ouverture trade
-                    if sb_client:
+                    # Sync capital — source de vérité : balance réelle MT5 (sinon fallback Supabase)
+                    _acct = fetch_mt5_account()
+                    if _acct and float(_acct.get("balance") or 0) > 0:
+                        _real_bal = float(_acct["balance"])
+                        if abs(_real_bal - data["capital"]) > 0.01:
+                            logger.info(f"Capital sync MT5 avant trade: {data['capital']:.2f} → {_real_bal:.2f}")
+                            data["capital"] = _real_bal
+                            if _real_bal > data.get("peak_capital", 0):
+                                data["peak_capital"] = _real_bal
+                    elif sb_client:
                         try:
                             _sr = sb_client.table("bot_state").select("capital").eq("id", 1).execute()
                             if _sr.data:
