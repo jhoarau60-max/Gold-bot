@@ -139,19 +139,24 @@ def place_order():
     qty     = float(data.get("qty", 0))
     sl      = float(data.get("sl", 0))
     tp      = float(data.get("tp", 0))
+    logger.info(f"/order reçu: action={action} ticker={ticker} qty={qty} sl={sl} tp={tp}")
 
     if action not in ("BUY", "SELL") or qty <= 0:
+        logger.warning(f"REJET 400 — paramètres invalides: action={action} qty={qty}")
         return jsonify({"error": f"paramètres invalides action={action} qty={qty}"}), 400
 
     if not ensure_mt5():
+        logger.error("REJET 500 — MT5 non disponible")
         return jsonify({"error": "MT5 non disponible"}), 500
 
     symbol = resolve_symbol(ticker)
     if not symbol:
+        logger.warning(f"REJET 400 — aucun symbole résolu pour {ticker}")
         return jsonify({"error": f"Aucun symbole pour {ticker} chez ce broker"}), 400
 
     # Activer le symbole si besoin
     if not mt5.symbol_select(symbol, True):
+        logger.warning(f"REJET 400 — symbol_select({symbol}) a échoué")
         return jsonify({"error": f"Symbole {symbol} introuvable dans MT5"}), 400
 
     volume = convert_to_lots(symbol, qty)
