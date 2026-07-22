@@ -20,6 +20,8 @@ import json
 import logging
 import io
 import re
+import time
+import uuid
 from datetime import datetime, timedelta
 
 import pytz
@@ -32,8 +34,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import google.generativeai as genai
 from supabase import create_client, Client
 
@@ -54,6 +56,10 @@ if not TELEGRAM_TOKEN:
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 JOETRADE_GROUP_ID = int(ENV.get("JOETRADE_GROUP_ID", "-1003942074689"))
 JOETRADE_THREAD_GOLD = 40
+
+# Validation manuelle des trades — le bot propose, johnny valide avant ouverture réelle.
+SIGNAL_VALIDATION_TIMEOUT = 10 * 60  # 10 minutes
+PENDING_SIGNALS: dict[str, dict] = {}  # signal_id -> {ticker, direction, score, params, feats_final, expire_at, ...}
 GEMINI_API_KEY  = ENV.get("GEMINI_API_KEY", "")
 CAPITAL_INITIAL = float(ENV.get("CAPITAL", "100"))
 
@@ -2977,6 +2983,21 @@ async def trading_loop(app: Application):
                 except Exception:
                     pass
 
+            # Signaux en attente de validation périmés (10 min sans réponse) → auto-ignorés
+            now_ts = time.time()
+            for sig_id in [k for k, v in PENDING_SIGNALS.items() if now_ts > v["expire_at"]]:
+                sig = PENDING_SIGNALS.pop(sig_id, None)
+                if not sig:
+                    continue
+                try:
+                    await app.bot.edit_message_text(
+                        chat_id=sig["chat_id"], message_id=sig["message_id"],
+                        text=sig["base_text"] + "\n\n⏰ *Signal périmé — non exécuté (10 min dépassées).*",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+
             # Exits toujours surveillés — même hors session (évite positions bloquées overnight)
             for ticker, info in instruments.items():
                 df_exit = await fetch_async(ticker)
@@ -3243,67 +3264,43 @@ async def trading_loop(app: Application):
                 if direction:
                     feats_final = collect_features(df, data, direction, dxy_dir)
                     feats_final["score"] = score
-                    # Sync capital — source de vérité : balance réelle MT5 (sinon fallback Supabase)
-                    _acct = fetch_mt5_account()
-                    if _acct and float(_acct.get("balance") or 0) > 0:
-                        _real_bal = float(_acct["balance"])
-                        if abs(_real_bal - data["capital"]) > 0.01:
-                            logger.info(f"Capital sync MT5 avant trade: {data['capital']:.2f} → {_real_bal:.2f}")
-                            data["capital"] = _real_bal
-                            if _real_bal > data.get("peak_capital", 0):
-                                data["peak_capital"] = _real_bal
-                    elif sb_client:
-                        try:
-                            _sr = sb_client.table("bot_state").select("capital").eq("id", 1).execute()
-                            if _sr.data:
-                                _sb_cap = float(_sr.data[0].get("capital") or 0)
-                                if _sb_cap > 0 and _sb_cap < data["capital"] * 0.9:
-                                    logger.info(f"Capital sync avant trade: {data['capital']:.2f} → {_sb_cap:.2f}")
-                                    data["capital"] = _sb_cap
-                                    data["peak_capital"] = _sb_cap
-                        except Exception as _ce:
-                            logger.warning(f"Capital sync avant trade: {_ce}")
-                    pos = open_trade(data, ticker, direction, price, atr, score, params=params)
-                    data = load_data()
-                    if pos and pos.get("signal_only"):
-                        em  = "📈" if direction == "BUY" else "📉"
-                        pat = f"\n📊 Pattern : `{pattern}`" if pattern else ""
-                        session_str = get_current_session()
-                        ml_str = f"\n🤖 ML : `{ml_proba:.0%}`" if ml_proba >= 0 else ""
-                        msg = (
-                            f"🔔 *SIGNAL DÉTECTÉ — {info['name']} (non exécuté)*\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"MT5 inactif/injoignable — aucun ordre passé, capital réel intact.\n"
-                            f"Session : `{session_str}` | DXY : `{dxy_dir}`\n"
-                            f"Direction : *{direction}* | Score : `{score}/7`\n"
-                            f"Prix d'entrée théorique : `{price:.4f}`\n"
-                            f"Stop-Loss : `{pos['sl']:.4f}`\n"
-                            f"Take-Profit : `{pos['tp']:.4f}`{pat}{ml_str}\n\n"
-                            f"*Signaux :*\n" + "\n".join(reasons[:4])
-                        )
-                        try:
-                            await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
-                        except Exception:
-                            pass
-                    elif pos:
-                        log_trade_features(feats_final, pos.get("supabase_id", ""))
-                        pos["session"] = get_current_session()
-                        em  = "🟢📈" if direction == "BUY" else "🔴📉"
-                        msg = (
-                            f"{em} *{direction} — {info['name']}*\n"
-                            f"⏱ Timeframe : `M5`\n"
-                            f"💰 Entrée : `{price:.2f}`\n"
-                            f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
-                        )
-                        try:
-                            await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
-                        except Exception:
-                            pass
-                        if JOETRADE_GROUP_ID:
-                            try:
-                                await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
-                            except Exception:
-                                pass
+
+                    # Plus d'ouverture automatique — le signal est proposé à johnny,
+                    # qui doit valider via le bouton Telegram avant tout ordre réel.
+                    sl_mult_disp = (params or {}).get("sl_mult", 1.5)
+                    tp_mult_disp = (params or {}).get("tp_mult", 3.0)
+                    sl_disp = price - atr * sl_mult_disp if direction == "BUY" else price + atr * sl_mult_disp
+                    tp_disp = price + atr * tp_mult_disp if direction == "BUY" else price - atr * tp_mult_disp
+
+                    signal_id = uuid.uuid4().hex[:8]
+                    keyboard  = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Valider", callback_data=f"sigval:{signal_id}"),
+                        InlineKeyboardButton("❌ Ignorer", callback_data=f"sigign:{signal_id}"),
+                    ]])
+                    em  = "🟢📈" if direction == "BUY" else "🔴📉"
+                    msg = (
+                        f"{em} *Signal {direction} — {info['name']}* (score `{score}/7`)\n"
+                        f"⏱ Timeframe : `M5`\n"
+                        f"💰 Entrée (approx.) : `{price:.2f}`\n"
+                        f"🛑 SL prévu : `{sl_disp:.2f}`   🎯 TP prévu : `{tp_disp:.2f}`\n\n"
+                        f"⏳ En attente de validation (10 min max)"
+                    )
+                    try:
+                        sent = await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown", reply_markup=keyboard)
+                        PENDING_SIGNALS[signal_id] = {
+                            "ticker":      ticker,
+                            "direction":   direction,
+                            "score":       score,
+                            "params":      params,
+                            "feats_final": feats_final,
+                            "info_name":   info["name"],
+                            "expire_at":   time.time() + SIGNAL_VALIDATION_TIMEOUT,
+                            "chat_id":     JOHN_ID,
+                            "message_id":  sent.message_id,
+                            "base_text":   msg,
+                        }
+                    except Exception as e:
+                        logger.error(f"Envoi signal en attente de validation: {e}")
 
             # Résumé toutes les heures (cycle 12 = 12×5min)
             if cycle % 12 == 0 and hourly_lines:
@@ -3709,6 +3706,136 @@ async def cmd_resume_challenge(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info("Challenge repris manuellement par John (challenge_paused=False)")
 
 
+# ── VALIDATION MANUELLE DES SIGNAUX (boutons Telegram) ─────────────────────────
+async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gère les clics sur les boutons ✅ Valider / ❌ Ignorer d'un signal proposé."""
+    query = update.callback_query
+    if query.from_user.id != JOHN_ID:
+        await query.answer("Non autorisé.", show_alert=True)
+        return
+    await query.answer()
+
+    try:
+        action, signal_id = query.data.split(":", 1)
+    except ValueError:
+        return
+
+    sig = PENDING_SIGNALS.pop(signal_id, None)
+    base_text = sig["base_text"] if sig else (query.message.text or "")
+
+    if not sig:
+        try:
+            await query.edit_message_text(base_text + "\n\n⚠️ Signal déjà traité ou expiré.", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    if action == "sigign":
+        try:
+            await query.edit_message_text(base_text + "\n\n❌ *Ignoré par johnny.*", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    # action == "sigval"
+    if time.time() > sig["expire_at"]:
+        try:
+            await query.edit_message_text(base_text + "\n\n⏰ *Signal périmé (10 min dépassées) — non exécuté.*", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    ticker    = sig["ticker"]
+    direction = sig["direction"]
+
+    # Prix/ATR frais au moment de la validation — évite d'ouvrir sur un prix obsolète
+    fresh_df = await fetch_async(ticker, period="5d", interval="5m")
+    if fresh_df is None or fresh_df.empty or len(fresh_df) < 20:
+        try:
+            await query.edit_message_text(base_text + "\n\n⚠️ Prix frais indisponible — trade annulé.", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+    fresh_df    = compute_indicators(fresh_df)
+    fresh_price = float(fresh_df["Close"].squeeze().iloc[-1])
+    fresh_atr   = float(fresh_df["ATR"].iloc[-1])
+    if pd.isna(fresh_atr) or fresh_atr <= 0:
+        try:
+            await query.edit_message_text(base_text + "\n\n⚠️ ATR invalide — trade annulé.", parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    data = load_data()
+    # Sync capital — source de vérité : balance réelle MT5 (sinon fallback Supabase)
+    _acct = fetch_mt5_account()
+    if _acct and float(_acct.get("balance") or 0) > 0:
+        _real_bal = float(_acct["balance"])
+        if abs(_real_bal - data["capital"]) > 0.01:
+            data["capital"] = _real_bal
+            if _real_bal > data.get("peak_capital", 0):
+                data["peak_capital"] = _real_bal
+    elif sb_client:
+        try:
+            _sr = sb_client.table("bot_state").select("capital").eq("id", 1).execute()
+            if _sr.data:
+                _sb_cap = float(_sr.data[0].get("capital") or 0)
+                if _sb_cap > 0 and _sb_cap < data["capital"] * 0.9:
+                    data["capital"] = _sb_cap
+                    data["peak_capital"] = _sb_cap
+        except Exception:
+            pass
+
+    pos = open_trade(data, ticker, direction, fresh_price, fresh_atr, sig["score"], params=sig["params"])
+
+    if not pos:
+        try:
+            await query.edit_message_text(
+                base_text + "\n\n⚠️ *Validé mais refusé* — limite journalière, drawdown ou position déjà ouverte sur ce ticker.",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    if pos.get("signal_only"):
+        try:
+            await query.edit_message_text(
+                base_text + "\n\n⚠️ *Validé mais non exécuté* — MT5 inactif/injoignable, aucun ordre réel passé.",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    if sig.get("feats_final"):
+        log_trade_features(sig["feats_final"], pos.get("supabase_id", ""))
+
+    confirm_txt = (
+        base_text + "\n\n"
+        f"✅ *Validé par johnny — trade ouvert !*\n"
+        f"💰 Entrée réelle : `{fresh_price:.2f}`\n"
+        f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
+    )
+    try:
+        await query.edit_message_text(confirm_txt, parse_mode="Markdown")
+    except Exception:
+        pass
+
+    if JOETRADE_GROUP_ID:
+        try:
+            em = "🟢📈" if direction == "BUY" else "🔴📉"
+            grp_msg = (
+                f"{em} *{direction} — {sig['info_name']}*\n"
+                f"⏱ Timeframe : `M5`\n"
+                f"💰 Entrée : `{fresh_price:.2f}`\n"
+                f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
+            )
+            await context.bot.send_message(JOETRADE_GROUP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+        except Exception:
+            pass
+
+
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -3725,6 +3852,7 @@ async def main():
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
     app.add_handler(MessageHandler(filters.Regex(r'https?://\S+') & filters.ChatType.PRIVATE, cmd_wiki))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE & filters.CaptionRegex(r'^/wiki'), cmd_wiki))
+    app.add_handler(CallbackQueryHandler(on_signal_callback, pattern=r'^sig(val|ign):'))
 
     await app.initialize()
     await app.start()
