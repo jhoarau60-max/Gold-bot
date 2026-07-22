@@ -2969,6 +2969,7 @@ async def trading_loop(app: Application):
                     await app.bot.send_message(
                         JOHN_ID,
                         f"✋ *Fermeture manuelle — {dir_em_m} {dir_m}*\n"
+                        f"⏱ Timeframe : `M5`\n"
                         f"💰 Entrée : `{pos.get('entry_price', 0):.2f}`\n"
                         f"{em_m} P&L : `{pnl_m:+.2f}$`",
                         parse_mode="Markdown"
@@ -2991,6 +2992,7 @@ async def trading_loop(app: Application):
                     em  = "✅" if pnl_e > 0 else "❌"
                     msg = (
                         f"{em} *{pos['direction']} — {info['name']}*\n"
+                        f"⏱ Timeframe : `M5`\n"
                         f"💰 Entrée : `{pos['entry_price']:.2f}`\n"
                         f"🛑 SL : `{pos['sl']:.2f}`\n"
                         f"💵 P&L : `{pnl_e:+.2f}$`"
@@ -3289,6 +3291,7 @@ async def trading_loop(app: Application):
                         em  = "🟢📈" if direction == "BUY" else "🔴📉"
                         msg = (
                             f"{em} *{direction} — {info['name']}*\n"
+                            f"⏱ Timeframe : `M5`\n"
                             f"💰 Entrée : `{price:.2f}`\n"
                             f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
                         )
