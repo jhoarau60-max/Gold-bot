@@ -1264,6 +1264,32 @@ def _detect_ifvg(df: pd.DataFrame, lookback: int = 50) -> tuple[bool, bool, str]
                 return True, False, f"✅ IFVG haussier [{gap_lo:.2f}–{gap_hi:.2f}]"
     return False, False, ""
 
+def detect_choch(df: pd.DataFrame, n: int = 3, lookback: int = 80) -> tuple[str | None, str]:
+    """Détecte un CHoCH (Change of Character — ICT/SMC) : cassure de structure de marché.
+    Structure haussière (plus haut > précédent ET plus bas > précédent) cassée par une
+    clôture sous le dernier plus bas structurel = retournement baissier en cours (BEAR_CHOCH),
+    même si les moyennes mobiles longues (EMA200, tendance 1H/4H) n'ont pas encore basculé.
+    Symétrique pour BULL_CHOCH. Permet de détecter un retournement plus tôt que les filtres
+    de tendance longue, qui réagissent avec retard (cf. audit biais BUY-only)."""
+    recent = df.tail(lookback)
+    if len(recent) < n * 2 + 10:
+        return None, ""
+    highs, lows = detect_pivots(recent, n=n)
+    if len(highs) < 2 or len(lows) < 2:
+        return None, ""
+    last_close = float(recent["Close"].iloc[-1])
+    h_last, h_prev = highs[-1][1], highs[-2][1]
+    l_last, l_prev = lows[-1][1], lows[-2][1]
+
+    structure_up   = h_last > h_prev and l_last > l_prev
+    structure_down = h_last < h_prev and l_last < l_prev
+
+    if structure_up and last_close < l_last:
+        return "BEAR_CHOCH", f"🔻 CHoCH baissier — structure haussière cassée sous {l_last:.2f}"
+    if structure_down and last_close > h_last:
+        return "BULL_CHOCH", f"🔺 CHoCH haussier — structure baissière cassée au-dessus {h_last:.2f}"
+    return None, ""
+
 # ── SCORE DE SIGNAL (système de notation multi-critères) ───────────────────────
 def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | None, int, list[str]]:
     """
@@ -1335,8 +1361,8 @@ def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | No
         score_sell += 1
         reasons_sell.append("✅ MACD baissier")
 
-    # 4. RSI (Wilder) — zone élargie en tendance forte
-    strong_uptrend = adx > 29.3 and ema9 > ema21
+    # 4. RSI (Wilder) — zones extrêmes symétriques BUY/SELL (plus de suppression
+    # unilatérale du signal SELL en tendance haussière forte — cf. audit biais BUY)
     if 45 <= rsi <= 75:
         score_buy += 1
         reasons_buy.append(f"✅ RSI favorable achat ({rsi:.1f})")
@@ -1344,11 +1370,8 @@ def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | No
         score_sell += 1
         reasons_sell.append(f"✅ RSI momentum baissier ({rsi:.1f})")
     elif rsi > 75:
-        if not strong_uptrend:
-            score_sell += 1
-            reasons_sell.append(f"⚠️ RSI en surachat ({rsi:.1f})")
-        else:
-            reasons_buy.append(f"ℹ️ RSI élevé ({rsi:.1f}) — tendance forte, momentum maintenu")
+        score_sell += 1
+        reasons_sell.append(f"⚠️ RSI en surachat ({rsi:.1f})")
     elif rsi < 25:
         score_buy += 1
         reasons_buy.append(f"⚠️ RSI en survente ({rsi:.1f})")
@@ -1411,6 +1434,16 @@ def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | No
     if ifvg_bull: score_buy  += 2; reasons_buy.append(ifvg_desc)
     if ifvg_bear: score_sell += 2; reasons_sell.append(ifvg_desc)
 
+    # 12. CHoCH (Change of Character) — cassure de structure, détecte un retournement
+    # AVANT que l'EMA200/tendance 1H/4H n'ait basculé (celles-ci réagissent en retard)
+    choch_dir, choch_desc = detect_choch(df)
+    if choch_dir == "BULL_CHOCH":
+        score_buy += 2
+        reasons_buy.append(choch_desc)
+    elif choch_dir == "BEAR_CHOCH":
+        score_sell += 2
+        reasons_sell.append(choch_desc)
+
     # threshold passé en paramètre (adaptive_params) — ICT confluence : OTE + FVG/OB + confirmations
     threshold = max(3, min(6, int(threshold)))
 
@@ -1419,16 +1452,21 @@ def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | No
         logger.info(f"Signal bloqué — ADX trop faible ({adx:.1f}) : marché en range, pas de trade")
         return None, max(score_buy, score_sell), []
 
-    # Filtre EMA200 obligatoire — trade UNIQUEMENT dans le sens de la tendance principale
+    # Filtre EMA200 obligatoire — trade UNIQUEMENT dans le sens de la tendance principale,
+    # SAUF si un CHoCH confirme que la structure vient de s'inverser (retournement réel en cours)
     if score_buy >= threshold and score_buy > score_sell:
-        if c < ema200:
+        if c < ema200 and choch_dir != "BULL_CHOCH":
             logger.info(f"BUY bloqué — prix ({c:.2f}) sous EMA200 ({ema200:.2f}) : contre-tendance")
             return None, score_buy, []
+        if c < ema200 and choch_dir == "BULL_CHOCH":
+            logger.info(f"BUY autorisé contre-EMA200 ({c:.2f} < {ema200:.2f}) — CHoCH haussier confirmé")
         return "BUY", min(score_buy, 7), reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
-        if c > ema200:
+        if c > ema200 and choch_dir != "BEAR_CHOCH":
             logger.info(f"SELL bloqué — prix ({c:.2f}) au-dessus EMA200 ({ema200:.2f}) : contre-tendance")
             return None, score_sell, []
+        if c > ema200 and choch_dir == "BEAR_CHOCH":
+            logger.info(f"SELL autorisé contre-EMA200 ({c:.2f} > {ema200:.2f}) — CHoCH baissier confirmé")
         return "SELL", min(score_sell, 7), reasons_sell
 
     logger.info(f"Signal XAU — BUY:{score_buy}/7 SELL:{score_sell}/7 (seuil:{threshold}) — pas assez fort")
