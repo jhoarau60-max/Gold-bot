@@ -2963,12 +2963,14 @@ async def trading_loop(app: Application):
             for pos in manually_closed:
                 pnl_m = pos.get("pnl", 0.0)
                 em_m  = "✅" if pnl_m > 0 else "❌"
+                dir_m = pos.get("direction", "")
+                dir_em_m = "🟢📈" if dir_m == "BUY" else "🔴📉"
                 try:
                     await app.bot.send_message(
                         JOHN_ID,
-                        f"✋ *Position fermée manuellement dans MT5*\n"
-                        f"{em_m} {pos.get('ticker','')} — P&L réel : `{pnl_m:+.2f}$`\n"
-                        f"Capital synchronisé : `{data['capital']:.2f}$`",
+                        f"✋ *Fermeture manuelle — {dir_em_m} {dir_m}*\n"
+                        f"💰 Entrée : `{pos.get('entry_price', 0):.2f}`\n"
+                        f"{em_m} P&L : `{pnl_m:+.2f}$`",
                         parse_mode="Markdown"
                     )
                 except Exception:
@@ -2987,16 +2989,11 @@ async def trading_loop(app: Application):
                     outcome = 1 if pnl_e > 0 else 0
                     update_trade_outcome(pos.get("supabase_id", ""), outcome, pnl_e)
                     em  = "✅" if pnl_e > 0 else "❌"
-                    rst = len(data.get("open_positions", []))
-                    rst_txt = "Aucun trade en cours" if rst == 0 else f"{rst} trade(s) en cours"
                     msg = (
-                        f"{em} *Trade fermé — {info['name']}*\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"Direction : {pos['direction']} | Score : `{pos.get('score','?')}/7`\n"
-                        f"Entrée : `{pos['entry_price']:.4f}` → Sortie : `{price_exit:.4f}`\n"
-                        f"Raison : {reason}\n"
-                        f"P&L : `{pnl_e:+.2f} €` | Capital : `{data['capital']:.2f} €`\n"
-                        f"📊 {rst_txt}"
+                        f"{em} *{pos['direction']} — {info['name']}*\n"
+                        f"💰 Entrée : `{pos['entry_price']:.2f}`\n"
+                        f"🛑 SL : `{pos['sl']:.2f}`\n"
+                        f"💵 P&L : `{pnl_e:+.2f}$`"
                     )
                     try:
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
@@ -3289,19 +3286,11 @@ async def trading_loop(app: Application):
                     elif pos:
                         log_trade_features(feats_final, pos.get("supabase_id", ""))
                         pos["session"] = get_current_session()
-                        em  = "📈" if direction == "BUY" else "📉"
-                        pat = f"\n📊 Pattern : `{pattern}`" if pattern else ""
-                        session_str = get_current_session()
-                        ml_str = f"\n🤖 ML : `{ml_proba:.0%}`" if ml_proba >= 0 else ""
+                        em  = "🟢📈" if direction == "BUY" else "🔴📉"
                         msg = (
-                            f"{em} *TRADE EN COURS — {info['name']}*\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Session : `{session_str}` | DXY : `{dxy_dir}`\n"
-                            f"Direction : *{direction}* | Score : `{score}/7`\n"
-                            f"Prix d'entrée : `{price:.4f}`\n"
-                            f"Stop-Loss : `{pos['sl']:.4f}`\n"
-                            f"Take-Profit : `{pos['tp']:.4f}`{pat}{ml_str}\n\n"
-                            f"*Signaux :*\n" + "\n".join(reasons[:4])
+                            f"{em} *{direction} — {info['name']}*\n"
+                            f"💰 Entrée : `{price:.2f}`\n"
+                            f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
                         )
                         try:
                             await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
