@@ -25,18 +25,38 @@ app = Flask(__name__)
 SECRET_TOKEN = os.environ.get("MT5_BRIDGE_TOKEN", "CHANGE_ME_TOKEN")
 MT5_MAGIC    = 20260714  # identifiant unique GoldBot
 
-# Mapping ticker Gold Bot → symbole MT5
-SYMBOL_MAP = {
-    "XAUUSD=X": "XAUUSD",
-    "XAGUSD=X": "XAGUSD",
+# Mapping ticker Gold Bot → candidats de symbole MT5 (varie selon le broker :
+# RaiseGlobalSA utilise "Gold"/"Silver", d'autres "XAUUSD", "GOLD.r", etc.)
+# resolve_symbol() teste ces noms puis, en dernier recours, cherche dans la liste
+# complète des symboles du broker un nom contenant gold/xau (ou silver/xag).
+SYMBOL_CANDIDATES = {
+    "XAUUSD=X": ["Gold", "gold", "XAUUSD", "GOLD", "XAUUSD.r", "XAUUSD.raw", "GOLD.r", "GOLDUSD"],
+    "XAGUSD=X": ["Silver", "silver", "XAGUSD", "SILVER", "XAGUSD.r", "XAGUSD.raw", "SILVERUSD"],
 }
 
-# Conversion units OANDA → lots MT5
-# XAUUSD : 1 lot MT5 = 100 oz → divise qty par 100
-LOT_DIVISOR = {
-    "XAUUSD": 100.0,
-    "XAGUSD": 5000.0,
-}
+_symbol_cache = {}
+
+def resolve_symbol(ticker: str) -> str | None:
+    """Trouve le vrai nom du symbole chez CE broker. Résultat mis en cache."""
+    if ticker in _symbol_cache:
+        return _symbol_cache[ticker]
+    # 1) Essaie les noms connus
+    for cand in SYMBOL_CANDIDATES.get(ticker, [ticker]):
+        if mt5.symbol_info(cand) is not None:
+            _symbol_cache[ticker] = cand
+            logger.info(f"Symbole résolu {ticker} → {cand}")
+            return cand
+    # 2) Recherche par mot-clé dans tous les symboles du broker
+    keyword = "xau" if "XAU" in ticker else ("xag" if "XAG" in ticker else "")
+    alt     = "gold" if keyword == "xau" else ("silver" if keyword == "xag" else "")
+    for s in (mt5.symbols_get() or []):
+        name = s.name.lower()
+        if keyword and (keyword in name or alt in name):
+            _symbol_cache[ticker] = s.name
+            logger.info(f"Symbole résolu par recherche {ticker} → {s.name}")
+            return s.name
+    logger.error(f"Aucun symbole trouvé pour {ticker} chez ce broker")
+    return None
 
 MAX_LOT_SIZE = 0.03  # cap prop firm RaiseMyFund — jamais plus de 0.03 lots
 
@@ -52,10 +72,11 @@ def ensure_mt5():
 
 
 def convert_to_lots(symbol: str, qty: float) -> float:
-    """Convertit qty (unités OANDA/oz) en lots MT5."""
-    divisor = LOT_DIVISOR.get(symbol, 100.0)
-    lots = qty / divisor
+    """Convertit qty (onces) en lots MT5 en utilisant la vraie taille de contrat du broker."""
     info = mt5.symbol_info(symbol)
+    # trade_contract_size = onces par lot (100 pour l'or chez la plupart des brokers)
+    contract = info.trade_contract_size if info and info.trade_contract_size else 100.0
+    lots = qty / contract
     vol_min  = info.volume_min  if info else 0.01
     vol_step = info.volume_step if info else 0.01
     # Arrondi au step, minimum vol_min, maximum MAX_LOT_SIZE
@@ -122,10 +143,12 @@ def place_order():
     if action not in ("BUY", "SELL") or qty <= 0:
         return jsonify({"error": f"paramètres invalides action={action} qty={qty}"}), 400
 
-    symbol = SYMBOL_MAP.get(ticker, "XAUUSD")
-
     if not ensure_mt5():
         return jsonify({"error": "MT5 non disponible"}), 500
+
+    symbol = resolve_symbol(ticker)
+    if not symbol:
+        return jsonify({"error": f"Aucun symbole pour {ticker} chez ce broker"}), 400
 
     # Activer le symbole si besoin
     if not mt5.symbol_select(symbol, True):
