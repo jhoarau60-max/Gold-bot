@@ -3695,7 +3695,7 @@ async def cmd_propfirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     em_45 = "✅" if rule45_ok else "⚠️"
 
     msg = (
-        f"📊 *PROP FIRM — RaiseMyFund #1046385*\n"
+        f"📊 *PROP FIRM — RaiseMyFund #1046682*\n"
         f"_Source : {source_note}_\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{em_d}  *Perte journalière* : `{daily_used:.2f}$` / 500$\n"
