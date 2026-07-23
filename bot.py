@@ -1703,12 +1703,15 @@ async def post_result_to_all_groups(bot, text: str, photo_path: str | None = Non
     for chat_id, thread_id in RESULT_DESTINATIONS:
         if not chat_id:
             continue
+        # Le topic "Général" (id=1) d'un forum Telegram n'accepte pas message_thread_id
+        # via l'API Bot (erreur "message thread not found") — il faut l'omettre.
+        kwargs = {} if thread_id == 1 else {"message_thread_id": thread_id}
         try:
             if photo_path and os.path.exists(photo_path):
                 with open(photo_path, "rb") as _f:
-                    await bot.send_photo(chat_id, photo=_f, caption=text, parse_mode="Markdown", message_thread_id=thread_id)
+                    await bot.send_photo(chat_id, photo=_f, caption=text, parse_mode="Markdown", **kwargs)
             else:
-                await bot.send_message(chat_id, text, parse_mode="Markdown", message_thread_id=thread_id)
+                await bot.send_message(chat_id, text, parse_mode="Markdown", **kwargs)
         except Exception as e:
             logger.warning(f"post_result_to_all_groups échec chat={chat_id} thread={thread_id}: {e}")
 
@@ -3751,9 +3754,10 @@ async def cmd_testgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not chat_id:
             lines.append(f"⚠️ {label} — non configuré")
             continue
+        kwargs = {} if thread_id == 1 else {"message_thread_id": thread_id}
         try:
             await context.bot.send_message(
-                chat_id, test_msg, parse_mode="Markdown", message_thread_id=thread_id
+                chat_id, test_msg, parse_mode="Markdown", **kwargs
             )
             lines.append(f"✅ {label}\nGroupe : `{chat_id}` | Topic : `{thread_id}`")
         except Exception as e:
