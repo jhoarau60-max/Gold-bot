@@ -55,7 +55,20 @@ if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 JOETRADE_GROUP_ID = int(ENV.get("JOETRADE_GROUP_ID", "-1003942074689"))
-JOETRADE_THREAD_GOLD = 3   # topic "Information traiding" dans Jo trade public (vérifié via lien Telegram)
+JOETRADE_THREAD_GOLD = 1   # topic "Acceuil" dans Jo trade public — RÉSULTATS uniquement
+
+JOETRADE_GROUP_VIP_ID = int(ENV.get("JOETRADE_GROUP_VIP_ID", "-1003864643416"))
+JOETRADE_THREAD_GOLD_VIP = 6   # topic "Trade XAUUSD" dans JO TRADE (VIP) — TRADES + RÉSULTATS
+
+JOETRADE_GROUP_3_ID = int(ENV.get("JOETRADE_GROUP_3_ID", "-1002426337015"))
+JOETRADE_THREAD_GOLD_3 = 7947   # topic "Jo trade" dans Project inves'T — RÉSULTATS uniquement
+
+# Destinations où poster les RÉSULTATS (fermetures) : public + VIP + Project inves'T
+RESULT_DESTINATIONS = [
+    (JOETRADE_GROUP_ID,     JOETRADE_THREAD_GOLD),
+    (JOETRADE_GROUP_VIP_ID, JOETRADE_THREAD_GOLD_VIP),
+    (JOETRADE_GROUP_3_ID,   JOETRADE_THREAD_GOLD_3),
+]
 
 # Validation manuelle des trades — le bot propose, johnny valide avant ouverture réelle.
 SIGNAL_VALIDATION_TIMEOUT = 10 * 60  # 10 minutes
@@ -1683,6 +1696,22 @@ def format_group_close(name: str, direction: str, pnl: float, reason: str = "") 
         f"💸 `{pnl:+.2f} $`"
     )
 
+async def post_result_to_all_groups(bot, text: str, photo_path: str | None = None) -> None:
+    """Poste un résultat (fermeture de trade) dans les 3 destinations :
+    Jo trade public, JO TRADE (VIP) et Project inves'T. Chaque envoi est
+    indépendant — l'échec d'une destination n'empêche pas les autres."""
+    for chat_id, thread_id in RESULT_DESTINATIONS:
+        if not chat_id:
+            continue
+        try:
+            if photo_path and os.path.exists(photo_path):
+                with open(photo_path, "rb") as _f:
+                    await bot.send_photo(chat_id, photo=_f, caption=text, parse_mode="Markdown", message_thread_id=thread_id)
+            else:
+                await bot.send_message(chat_id, text, parse_mode="Markdown", message_thread_id=thread_id)
+        except Exception as e:
+            logger.warning(f"post_result_to_all_groups échec chat={chat_id} thread={thread_id}: {e}")
+
 def diagnose_trade_rejection(data: dict, ticker: str) -> str:
     """Rejoue les mêmes conditions que open_trade() pour dire précisément
     pourquoi un trade validé a été refusé (message Telegram plus clair)."""
@@ -3033,18 +3062,9 @@ async def trading_loop(app: Application):
                     await app.bot.send_message(JOHN_ID, msg_m, parse_mode="Markdown")
                 except Exception:
                     pass
-                if JOETRADE_GROUP_ID:
-                    try:
-                        grp_msg_m = format_group_close(info_m['name'], dir_m, pnl_m)
-                        import os as _os
-                        _img = "trade_gagnant.jpg" if pnl_m > 0 else "trade_perdant.jpg"
-                        if _os.path.exists(_img):
-                            with open(_img, "rb") as _f:
-                                await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=grp_msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
-                        else:
-                            await app.bot.send_message(JOETRADE_GROUP_ID, grp_msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
-                    except Exception:
-                        pass
+                grp_msg_m = format_group_close(info_m['name'], dir_m, pnl_m)
+                _img_m = "trade_gagnant.jpg" if pnl_m > 0 else "trade_perdant.jpg"
+                await post_result_to_all_groups(app.bot, grp_msg_m, _img_m)
                 if pnl_m < 0:
                     asyncio.create_task(post_mortem_analysis(app, pos))
 
@@ -3087,18 +3107,9 @@ async def trading_loop(app: Application):
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                     except Exception:
                         pass
-                    if JOETRADE_GROUP_ID:
-                        try:
-                            grp_msg = format_group_close(info['name'], pos['direction'], pnl_e, reason)
-                            import os as _os
-                            _img = "trade_gagnant.jpg" if pnl_e > 0 else "trade_perdant.jpg"
-                            if _os.path.exists(_img):
-                                with open(_img, "rb") as _f:
-                                    await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
-                            else:
-                                await app.bot.send_message(JOETRADE_GROUP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
-                        except Exception:
-                            pass
+                    grp_msg = format_group_close(info['name'], pos['direction'], pnl_e, reason)
+                    _img_e = "trade_gagnant.jpg" if pnl_e > 0 else "trade_perdant.jpg"
+                    await post_result_to_all_groups(app.bot, grp_msg, _img_e)
                     if pnl_e < 0:
                         asyncio.create_task(post_mortem_analysis(app, pos))
 
@@ -3723,27 +3734,32 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_testgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test manuel — vérifie que le bot arrive bien à poster dans JOETRADE_GROUP_ID/topic."""
+    """Test manuel — vérifie que le bot arrive bien à poster dans les 3 destinations :
+    VIP (trades + résultats), public et Project inves'T (résultats)."""
     if update.effective_user.id != JOHN_ID:
         return
-    if not JOETRADE_GROUP_ID:
-        await update.message.reply_text("⚠️ JOETRADE_GROUP_ID n'est pas configuré.")
-        return
+
+    destinations = [
+        ("VIP — JO TRADE / Trade XAUUSD", JOETRADE_GROUP_VIP_ID, JOETRADE_THREAD_GOLD_VIP),
+        ("Public — Jo trade public / Acceuil", JOETRADE_GROUP_ID, JOETRADE_THREAD_GOLD),
+        ("Project inves'T / Jo trade", JOETRADE_GROUP_3_ID, JOETRADE_THREAD_GOLD_3),
+    ]
     test_msg = format_group_open("BUY", "Or (XAU/USD) — TEST", 4100.00, 4090.00, 4120.00)
-    try:
-        await context.bot.send_message(
-            JOETRADE_GROUP_ID, test_msg, parse_mode="Markdown",
-            message_thread_id=JOETRADE_THREAD_GOLD
-        )
-        await update.message.reply_text(
-            f"✅ Message test envoyé avec succès.\nGroupe : `{JOETRADE_GROUP_ID}` | Topic : `{JOETRADE_THREAD_GOLD}`",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            f"❌ Échec de l'envoi au groupe.\nGroupe : `{JOETRADE_GROUP_ID}` | Topic : `{JOETRADE_THREAD_GOLD}`\nErreur : `{e}`",
-            parse_mode="Markdown"
-        )
+
+    lines = []
+    for label, chat_id, thread_id in destinations:
+        if not chat_id:
+            lines.append(f"⚠️ {label} — non configuré")
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id, test_msg, parse_mode="Markdown", message_thread_id=thread_id
+            )
+            lines.append(f"✅ {label}\nGroupe : `{chat_id}` | Topic : `{thread_id}`")
+        except Exception as e:
+            lines.append(f"❌ {label}\nGroupe : `{chat_id}` | Topic : `{thread_id}`\nErreur : `{e}`")
+
+    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3914,10 +3930,10 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
 
-    if JOETRADE_GROUP_ID:
+    if JOETRADE_GROUP_VIP_ID:
         try:
             grp_msg = format_group_open(direction, sig['info_name'], fresh_price, pos['sl'], pos['tp'])
-            await context.bot.send_message(JOETRADE_GROUP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+            await context.bot.send_message(JOETRADE_GROUP_VIP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD_VIP)
         except Exception:
             pass
 
