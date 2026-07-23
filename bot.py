@@ -68,6 +68,10 @@ NEXOS_ASSET_MAP = {
     "XAGUSD=X": ("ARGENT", "XAGUSD"),
 }
 
+# Secret partagé avec Sofia : quand johnny valide un signal côté JoTrade, Sofia
+# rappelle Gold Bot sur POST /execute/<GOLD_EXEC_SECRET> pour déclencher le vrai trade MT5.
+GOLD_EXEC_SECRET = ENV.get("GOLD_EXEC_SECRET", "goldexec")
+
 # Validation manuelle des trades — le bot propose, johnny valide avant ouverture réelle.
 SIGNAL_VALIDATION_TIMEOUT = 10 * 60  # 10 minutes
 PENDING_SIGNALS: dict[str, dict] = {}  # signal_id -> {ticker, direction, score, params, feats_final, expire_at, ...}
@@ -3081,9 +3085,9 @@ async def trading_loop(app: Application):
                 if not sig:
                     continue
                 try:
-                    await app.bot.edit_message_text(
-                        chat_id=sig["chat_id"], message_id=sig["message_id"],
-                        text=sig["base_text"] + "\n\n⏰ *Signal périmé — non exécuté (10 min dépassées).*",
+                    await app.bot.send_message(
+                        JOHN_ID,
+                        f"⏰ *Signal {sig['direction']} {sig['info_name']} périmé* — non validé via Sofia dans les 10 min, non exécuté.",
                         parse_mode="Markdown"
                     )
                 except Exception:
@@ -3352,43 +3356,43 @@ async def trading_loop(app: Application):
                     feats_final = collect_features(df, data, direction, dxy_dir)
                     feats_final["score"] = score
 
-                    # Plus d'ouverture automatique — le signal est proposé à johnny,
-                    # qui doit valider via le bouton Telegram avant tout ordre réel.
+                    # Plus d'ouverture automatique et plus de validation directe par Gold Bot —
+                    # le signal est relayé à Sofia (webhook JoTrade), qui demande sa PROPRE
+                    # validation à johnny ("Publier dans Joe Trade ?"). Quand johnny valide côté
+                    # Sofia, elle rappelle Gold Bot (/execute/<secret>) qui ouvre alors le vrai
+                    # trade MT5 — une seule validation, faite dans l'interface Sofia.
                     sl_mult_disp = (params or {}).get("sl_mult", 1.5)
                     tp_mult_disp = (params or {}).get("tp_mult", 3.0)
                     sl_disp = price - atr * sl_mult_disp if direction == "BUY" else price + atr * sl_mult_disp
                     tp_disp = price + atr * tp_mult_disp if direction == "BUY" else price - atr * tp_mult_disp
 
                     signal_id = uuid.uuid4().hex[:8]
-                    keyboard  = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ Valider", callback_data=f"sigval:{signal_id}"),
-                        InlineKeyboardButton("❌ Ignorer", callback_data=f"sigign:{signal_id}"),
-                    ]])
-                    em  = "🟢📈" if direction == "BUY" else "🔴📉"
-                    msg = (
-                        f"{em} *Signal {direction} — {info['name']}* (score `{score}/7`)\n"
-                        f"⏱ Timeframe : `M5`\n"
-                        f"💰 Entrée (approx.) : `{price:.2f}`\n"
-                        f"🛑 SL prévu : `{sl_disp:.2f}`\n"
-                        f"🎯 TP prévu : `{tp_disp:.2f}`\n\n"
-                        f"⏳ En attente de validation (10 min max)"
-                    )
-                    try:
-                        sent = await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown", reply_markup=keyboard)
-                        PENDING_SIGNALS[signal_id] = {
-                            "ticker":      ticker,
-                            "direction":   direction,
-                            "score":       score,
-                            "params":      params,
-                            "feats_final": feats_final,
-                            "info_name":   info["name"],
-                            "expire_at":   time.time() + SIGNAL_VALIDATION_TIMEOUT,
-                            "chat_id":     JOHN_ID,
-                            "message_id":  sent.message_id,
-                            "base_text":   msg,
-                        }
-                    except Exception as e:
-                        logger.error(f"Envoi signal en attente de validation: {e}")
+                    PENDING_SIGNALS[signal_id] = {
+                        "ticker":      ticker,
+                        "direction":   direction,
+                        "score":       score,
+                        "params":      params,
+                        "feats_final": feats_final,
+                        "info_name":   info["name"],
+                        "expire_at":   time.time() + SIGNAL_VALIDATION_TIMEOUT,
+                    }
+                    asset_lbl, symbol_lbl = NEXOS_ASSET_MAP.get(ticker, (ticker, ticker))
+                    ok = await notify_jotrade_webhook({
+                        "type": direction, "asset": asset_lbl, "symbol": symbol_lbl,
+                        "tf": "5", "entry": price, "tp1": tp_disp, "sl": sl_disp,
+                        "gold_signal_id": signal_id,
+                    })
+                    if not ok:
+                        PENDING_SIGNALS.pop(signal_id, None)
+                        try:
+                            await app.bot.send_message(
+                                JOHN_ID,
+                                f"⚠️ Signal {direction} {info['name']} (score {score}/7) détecté mais webhook "
+                                f"Sofia injoignable — non envoyé pour validation.",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
 
             # Résumé toutes les heures (cycle 12 = 12×5min)
             if cycle % 12 == 0 and hourly_lines:
@@ -3861,44 +3865,16 @@ async def cmd_resume_challenge(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info("Challenge repris manuellement par John (challenge_paused=False)")
 
 
-# ── VALIDATION MANUELLE DES SIGNAUX (boutons Telegram) ─────────────────────────
-async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère les clics sur les boutons ✅ Valider / ❌ Ignorer d'un signal proposé."""
-    query = update.callback_query
-    if query.from_user.id != JOHN_ID:
-        await query.answer("Non autorisé.", show_alert=True)
-        return
-    await query.answer()
-
-    try:
-        action, signal_id = query.data.split(":", 1)
-    except ValueError:
-        return
-
+# ── EXÉCUTION D'UN SIGNAL VALIDÉ (via le webhook /execute appelé par Sofia) ────
+async def execute_pending_signal(app, signal_id: str) -> dict:
+    """Ouvre réellement (MT5) le signal en attente identifié par signal_id.
+    Appelé par le webhook /execute quand johnny valide côté Sofia ('Publier ?').
+    Retourne {'ok': True, 'ticket', 'entry', 'sl', 'tp'} ou {'ok': False, 'error': str}."""
     sig = PENDING_SIGNALS.pop(signal_id, None)
-    base_text = sig["base_text"] if sig else (query.message.text or "")
-
     if not sig:
-        try:
-            await query.edit_message_text(base_text + "\n\n⚠️ Signal déjà traité ou expiré.", parse_mode="Markdown")
-        except Exception:
-            pass
-        return
-
-    if action == "sigign":
-        try:
-            await query.edit_message_text(base_text + "\n\n❌ *Ignoré par johnny.*", parse_mode="Markdown")
-        except Exception:
-            pass
-        return
-
-    # action == "sigval"
+        return {"ok": False, "error": "signal introuvable, déjà traité ou expiré"}
     if time.time() > sig["expire_at"]:
-        try:
-            await query.edit_message_text(base_text + "\n\n⏰ *Signal périmé (10 min dépassées) — non exécuté.*", parse_mode="Markdown")
-        except Exception:
-            pass
-        return
+        return {"ok": False, "error": "signal périmé (10 min dépassées)"}
 
     ticker    = sig["ticker"]
     direction = sig["direction"]
@@ -3906,20 +3882,12 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Prix/ATR frais au moment de la validation — évite d'ouvrir sur un prix obsolète
     fresh_df = await fetch_async(ticker, period="5d", interval="5m")
     if fresh_df is None or fresh_df.empty or len(fresh_df) < 20:
-        try:
-            await query.edit_message_text(base_text + "\n\n⚠️ Prix frais indisponible — trade annulé.", parse_mode="Markdown")
-        except Exception:
-            pass
-        return
+        return {"ok": False, "error": "prix frais indisponible"}
     fresh_df    = compute_indicators(fresh_df)
     fresh_price = float(fresh_df["Close"].squeeze().iloc[-1])
     fresh_atr   = float(fresh_df["ATR"].iloc[-1])
     if pd.isna(fresh_atr) or fresh_atr <= 0:
-        try:
-            await query.edit_message_text(base_text + "\n\n⚠️ ATR invalide — trade annulé.", parse_mode="Markdown")
-        except Exception:
-            pass
-        return
+        return {"ok": False, "error": "ATR invalide"}
 
     data = load_data()
     # Sync capital — source de vérité : balance réelle MT5 (sinon fallback Supabase)
@@ -3944,46 +3912,62 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     pos = open_trade(data, ticker, direction, fresh_price, fresh_atr, sig["score"], params=sig["params"])
 
     if not pos:
-        reason = diagnose_trade_rejection(data, ticker)
-        try:
-            await query.edit_message_text(
-                base_text + f"\n\n⚠️ *Validé mais refusé* — {reason}.",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-        return
-
+        return {"ok": False, "error": diagnose_trade_rejection(data, ticker)}
     if pos.get("signal_only"):
-        try:
-            await query.edit_message_text(
-                base_text + "\n\n⚠️ *Validé mais non exécuté* — MT5 inactif/injoignable, aucun ordre réel passé.",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-        return
+        return {"ok": False, "error": "MT5 inactif/injoignable, aucun ordre réel passé"}
 
     if sig.get("feats_final"):
         log_trade_features(sig["feats_final"], pos.get("supabase_id", ""))
 
-    confirm_txt = (
-        base_text + "\n\n"
-        f"✅ *Validé par johnny — trade ouvert !*\n"
-        f"💰 Entrée réelle : `{fresh_price:.2f}`\n"
-        f"🛑 SL : `{pos['sl']:.2f}`\n"
-        f"🎯 TP : `{pos['tp']:.2f}`"
-    )
     try:
-        await query.edit_message_text(confirm_txt, parse_mode="Markdown")
+        await app.bot.send_message(
+            JOHN_ID,
+            f"✅ *Validé via Sofia — trade ouvert !*\n"
+            f"{sig.get('info_name', ticker)} — {direction}\n"
+            f"💰 Entrée réelle : `{fresh_price:.2f}`\n"
+            f"🛑 SL : `{pos['sl']:.2f}`\n"
+            f"🎯 TP : `{pos['tp']:.2f}`",
+            parse_mode="Markdown"
+        )
     except Exception:
         pass
 
-    asset_lbl, symbol_lbl = NEXOS_ASSET_MAP.get(sig["ticker"], (sig["ticker"], sig["ticker"]))
-    await notify_jotrade_webhook({
-        "type": direction, "asset": asset_lbl, "symbol": symbol_lbl,
-        "tf": "5", "entry": fresh_price, "tp1": pos["tp"], "sl": pos["sl"],
-    })
+    return {"ok": True, "ticket": pos.get("mt5_ticket"), "entry": pos["entry_price"], "sl": pos["sl"], "tp": pos["tp"]}
+
+
+async def start_exec_webhook(app):
+    """Serveur HTTP écouté par Sofia : quand johnny valide un signal côté JoTrade
+    ('Publier ?'), Sofia POST ici avec le gold_signal_id pour déclencher le vrai
+    trade MT5. Protégé par GOLD_EXEC_SECRET (même secret des deux côtés)."""
+    from aiohttp import web as aio_web
+
+    async def handle_execute(request: aio_web.Request) -> aio_web.Response:
+        if request.match_info.get("secret", "") != GOLD_EXEC_SECRET:
+            return aio_web.Response(status=403, text="Forbidden")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        signal_id = body.get("signal_id", "")
+        logger.info(f"/execute reçu: signal_id={signal_id}")
+        result = await execute_pending_signal(app, signal_id)
+        if not result.get("ok"):
+            try:
+                await app.bot.send_message(
+                    JOHN_ID, f"❌ Validé via Sofia mais trade refusé : {result.get('error')}",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+        return aio_web.json_response(result)
+
+    web_app = aio_web.Application()
+    web_app.router.add_post("/execute/{secret}", handle_execute)
+    port = int(os.environ.get("PORT", 8081))
+    runner = aio_web.AppRunner(web_app)
+    await runner.setup()
+    await aio_web.TCPSite(runner, "0.0.0.0", port).start()
+    logger.info(f"Webhook exécution actif sur port {port} — /execute/{GOLD_EXEC_SECRET}")
 
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
@@ -4004,11 +3988,11 @@ async def main():
     app.add_handler(CommandHandler("wikisend",  cmd_wikisend))
     app.add_handler(MessageHandler(filters.Regex(r'https?://\S+') & filters.ChatType.PRIVATE, cmd_wiki))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE & filters.CaptionRegex(r'^/wiki'), cmd_wiki))
-    app.add_handler(CallbackQueryHandler(on_signal_callback, pattern=r'^sig(val|ign):'))
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
+    asyncio.create_task(start_exec_webhook(app))
 
     if JOHN_ID:
         try:
