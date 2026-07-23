@@ -3815,6 +3815,63 @@ async def cmd_testbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_testsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teste le VRAI circuit validé : envoie un signal en attente (PENDING_SIGNALS) à Sofia
+    SANS ouvrir de trade — le trade réel ne se déclenche que si johnny clique 'Publier ?'
+    côté Sofia (qui rappelle alors /execute). Usage: /testsignal [buy|sell] (défaut: sell)."""
+    if update.effective_user.id != JOHN_ID:
+        return
+    direction = "SELL"
+    if context.args and context.args[0].upper() in ("BUY", "SELL"):
+        direction = context.args[0].upper()
+
+    ticker = "XAUUSD=X"
+    await update.message.reply_text(f"🔍 Préparation signal test {direction} (circuit validé Sofia)...")
+
+    df = await fetch_async(ticker)
+    if df is None or len(df) < 20:
+        await update.message.reply_text("❌ Impossible de récupérer le prix/ATR.")
+        return
+    df    = compute_indicators(df)
+    price = float(df["Close"].squeeze().iloc[-1])
+    atr   = float(df["ATR"].iloc[-1])
+    if not atr or atr <= 0 or pd.isna(atr):
+        await update.message.reply_text("❌ ATR invalide.")
+        return
+
+    sl_mult, tp_mult = 1.5, 3.0
+    sl = price + atr * sl_mult if direction == "SELL" else price - atr * sl_mult
+    tp = price - atr * tp_mult if direction == "SELL" else price + atr * tp_mult
+    params = {"sl_mult": sl_mult, "tp_mult": tp_mult, "risk_per_trade": 0.01}
+
+    signal_id = uuid.uuid4().hex[:8]
+    PENDING_SIGNALS[signal_id] = {
+        "ticker":      ticker,
+        "direction":   direction,
+        "score":       0,
+        "params":      params,
+        "feats_final": None,
+        "info_name":   "Or (XAU/USD)",
+        "expire_at":   time.time() + SIGNAL_VALIDATION_TIMEOUT,
+    }
+    asset_lbl, symbol_lbl = NEXOS_ASSET_MAP.get(ticker, (ticker, ticker))
+    ok = await notify_jotrade_webhook({
+        "type": direction, "asset": asset_lbl, "symbol": symbol_lbl,
+        "tf": "5", "entry": price, "tp1": tp, "sl": sl,
+        "gold_signal_id": signal_id,
+    })
+    if not ok:
+        PENDING_SIGNALS.pop(signal_id, None)
+        await update.message.reply_text("⚠️ Webhook Sofia injoignable — rien envoyé.")
+        return
+
+    await update.message.reply_text(
+        "✅ Signal test envoyé à Sofia — AUCUN trade ouvert pour l'instant.\n"
+        "Va sur Sofia, clique 'Publier ?' pour déclencher le vrai trade MT5, "
+        "ou ignore pour vérifier que rien ne se passe."
+    )
+
+
 async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remet le capital à CAPITAL_INITIAL. Usage: /reset_capital ou /reset_capital 9958.94"""
     if update.effective_user.id != JOHN_ID:
@@ -3981,6 +4038,7 @@ async def main():
     app.add_handler(CommandHandler("myid",         cmd_myid))
     app.add_handler(CommandHandler("testgroup",    cmd_testgroup))
     app.add_handler(CommandHandler("testbuy",      cmd_testbuy))
+    app.add_handler(CommandHandler("testsignal",   cmd_testsignal))
     app.add_handler(CommandHandler("reset_capital", cmd_reset_capital))
     app.add_handler(CommandHandler("resume_challenge", cmd_resume_challenge))
     app.add_handler(CommandHandler("propfirm",      cmd_propfirm))
