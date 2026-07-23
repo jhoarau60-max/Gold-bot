@@ -3722,6 +3722,29 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def cmd_testgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test manuel — vérifie que le bot arrive bien à poster dans JOETRADE_GROUP_ID/topic."""
+    if update.effective_user.id != JOHN_ID:
+        return
+    if not JOETRADE_GROUP_ID:
+        await update.message.reply_text("⚠️ JOETRADE_GROUP_ID n'est pas configuré.")
+        return
+    test_msg = format_group_open("BUY", "Or (XAU/USD) — TEST", 4100.00, 4090.00, 4120.00)
+    try:
+        await context.bot.send_message(
+            JOETRADE_GROUP_ID, test_msg, parse_mode="Markdown",
+            message_thread_id=JOETRADE_THREAD_GOLD
+        )
+        await update.message.reply_text(
+            f"✅ Message test envoyé avec succès.\nGroupe : `{JOETRADE_GROUP_ID}` | Topic : `{JOETRADE_THREAD_GOLD}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Échec de l'envoi au groupe.\nGroupe : `{JOETRADE_GROUP_ID}` | Topic : `{JOETRADE_THREAD_GOLD}`\nErreur : `{e}`",
+            parse_mode="Markdown"
+        )
+
 
 async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remet le capital à CAPITAL_INITIAL. Usage: /reset_capital ou /reset_capital 9958.94"""
@@ -3908,6 +3931,7 @@ async def main():
     app.add_handler(CommandHandler("capital", cmd_capital))
     app.add_handler(CommandHandler("signal",  cmd_signal))
     app.add_handler(CommandHandler("myid",         cmd_myid))
+    app.add_handler(CommandHandler("testgroup",    cmd_testgroup))
     app.add_handler(CommandHandler("reset_capital", cmd_reset_capital))
     app.add_handler(CommandHandler("resume_challenge", cmd_resume_challenge))
     app.add_handler(CommandHandler("propfirm",      cmd_propfirm))
