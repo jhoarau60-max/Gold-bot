@@ -138,7 +138,9 @@ TRADES_FILE     = "trades.json"
 
 WEEKDAY_INSTRUMENTS = {
     "XAUUSD=X": {"name": "Or (XAU/USD)", "emoji": "🥇", "pip": 0.01},
-    # XAG/USD retiré — Twelve Data requiert plan Grow/Venture pour l'argent
+    # XAG/USD réactivé — Twelve Data échoue (plan Grow/Venture requis) mais le
+    # fallback OANDA puis yfinance (fetch()) prend le relais automatiquement.
+    "XAGUSD=X": {"name": "Argent (XAG/USD)", "emoji": "🥈", "pip": 0.001},
 }
 # ── DONNÉES PERSISTANTES ───────────────────────────────────────────────────────
 def _default_state() -> dict:
