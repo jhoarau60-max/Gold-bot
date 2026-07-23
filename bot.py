@@ -245,7 +245,7 @@ def load_data_from_supabase() -> dict:
                 "symbol,direction,price_entry,price_exit,pnl,score,opened_at,closed_at"
             ).eq("status", "closed").eq("bot", "gold").order(
                 "closed_at", desc=True
-            ).limit(100).execute()
+            ).limit(5000).execute()
             # Inverse : la requête renvoie le plus récent en premier,
             # mais closed_trades doit être chronologique (le plus récent en dernier)
             # comme les appends en cours d'exécution, sinon closed_trades[-1] pointe
