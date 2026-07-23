@@ -1652,6 +1652,25 @@ def open_trade(data: dict, ticker: str, direction: str,
 
     return pos
 
+def diagnose_trade_rejection(data: dict, ticker: str) -> str:
+    """Rejoue les mêmes conditions que open_trade() pour dire précisément
+    pourquoi un trade validé a été refusé (message Telegram plus clair)."""
+    if data.get("challenge_paused"):
+        return "objectif Challenge atteint — bot en pause (envoie /resume_challenge)"
+    if data["daily_pnl"] <= -(CAPITAL_INITIAL * MAX_DAILY_LOSS):
+        return f"limite de perte journalière atteinte ({data['daily_pnl']:.2f}$ / {-(CAPITAL_INITIAL * MAX_DAILY_LOSS):.2f}$)"
+    if data["daily_pnl"] >= MAX_DAILY_GAIN:
+        return f"cap de gain journalier atteint ({data['daily_pnl']:.2f}$ / {MAX_DAILY_GAIN:.2f}$)"
+    if data.get("daily_trades", 0) >= MAX_DAILY_TRADES:
+        return f"max {MAX_DAILY_TRADES} trades/jour déjà atteint ({data['daily_trades']})"
+    dd = get_drawdown(data)
+    if dd >= DRAWDOWN_PAUSE:
+        return f"drawdown {dd:.1%} ≥ {DRAWDOWN_PAUSE:.0%} — pause obligatoire"
+    for p in data["open_positions"]:
+        if p["ticker"] == ticker:
+            return f"une position {p['direction']} est déjà ouverte sur ce ticker (entrée {p['entry_price']:.2f})"
+    return "raison inconnue — vérifie les logs Railway"
+
 def check_exits(data: dict, ticker: str, price: float) -> list[tuple]:
     closed, remaining = [], []
     for pos in data["open_positions"]:
@@ -3789,9 +3808,10 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     pos = open_trade(data, ticker, direction, fresh_price, fresh_atr, sig["score"], params=sig["params"])
 
     if not pos:
+        reason = diagnose_trade_rejection(data, ticker)
         try:
             await query.edit_message_text(
-                base_text + "\n\n⚠️ *Validé mais refusé* — limite journalière, drawdown ou position déjà ouverte sur ce ticker.",
+                base_text + f"\n\n⚠️ *Validé mais refusé* — {reason}.",
                 parse_mode="Markdown"
             )
         except Exception:
