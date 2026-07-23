@@ -54,21 +54,19 @@ if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN manquant! Clés dispo: " + str([k for k in ENV if "TOKEN" in k.upper() or "TELEGRAM" in k.upper()]))
     raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
-JOETRADE_GROUP_ID = int(ENV.get("JOETRADE_GROUP_ID", "-1003942074689"))
-JOETRADE_THREAD_GOLD = 1   # topic "Acceuil" dans Jo trade public — RÉSULTATS uniquement
 
-JOETRADE_GROUP_VIP_ID = int(ENV.get("JOETRADE_GROUP_VIP_ID", "-1003864643416"))
-JOETRADE_THREAD_GOLD_VIP = 6   # topic "Trade XAUUSD" dans JO TRADE (VIP) — TRADES + RÉSULTATS
+# Gold Bot NE POSTE PLUS directement dans les groupes Telegram (JO TRADE VIP, Jo trade
+# public, Project inves'T) — c'est le bot Sofia (dossier telegram-bot) qui gère ça, via
+# son webhook JoTrade/NexosTrade. Sofia est déjà membre de tous ces groupes/topics et
+# demande sa propre validation ("Publier dans Joe Trade ?") avant de poster.
+# Gold Bot se contente de relayer chaque signal réel (ouverture/résultat) à ce webhook.
+NEXOS_WEBHOOK_URL = ENV.get("NEXOS_WEBHOOK_URL", "https://worker-production-3fd7.up.railway.app/nexos/nexostrade")
 
-JOETRADE_GROUP_3_ID = int(ENV.get("JOETRADE_GROUP_3_ID", "-1002426337015"))
-JOETRADE_THREAD_GOLD_3 = 7947   # topic "Jo trade" dans Project inves'T — RÉSULTATS uniquement
-
-# Destinations où poster les RÉSULTATS (fermetures) : public + VIP + Project inves'T
-RESULT_DESTINATIONS = [
-    (JOETRADE_GROUP_ID,     JOETRADE_THREAD_GOLD),
-    (JOETRADE_GROUP_VIP_ID, JOETRADE_THREAD_GOLD_VIP),
-    (JOETRADE_GROUP_3_ID,   JOETRADE_THREAD_GOLD_3),
-]
+# Mapping ticker Gold Bot → (asset affiché, symbol) attendus par le webhook de Sofia
+NEXOS_ASSET_MAP = {
+    "XAUUSD=X": ("OR", "XAUUSD"),
+    "XAGUSD=X": ("ARGENT", "XAGUSD"),
+}
 
 # Validation manuelle des trades — le bot propose, johnny valide avant ouverture réelle.
 SIGNAL_VALIDATION_TIMEOUT = 10 * 60  # 10 minutes
@@ -1696,24 +1694,24 @@ def format_group_close(name: str, direction: str, pnl: float, reason: str = "") 
         f"💸 `{pnl:+.2f} $`"
     )
 
-async def post_result_to_all_groups(bot, text: str, photo_path: str | None = None) -> None:
-    """Poste un résultat (fermeture de trade) dans les 3 destinations :
-    Jo trade public, JO TRADE (VIP) et Project inves'T. Chaque envoi est
-    indépendant — l'échec d'une destination n'empêche pas les autres."""
-    for chat_id, thread_id in RESULT_DESTINATIONS:
-        if not chat_id:
-            continue
-        # Le topic "Général" (id=1) d'un forum Telegram n'accepte pas message_thread_id
-        # via l'API Bot (erreur "message thread not found") — il faut l'omettre.
-        kwargs = {} if thread_id == 1 else {"message_thread_id": thread_id}
-        try:
-            if photo_path and os.path.exists(photo_path):
-                with open(photo_path, "rb") as _f:
-                    await bot.send_photo(chat_id, photo=_f, caption=text, parse_mode="Markdown", **kwargs)
-            else:
-                await bot.send_message(chat_id, text, parse_mode="Markdown", **kwargs)
-        except Exception as e:
-            logger.warning(f"post_result_to_all_groups échec chat={chat_id} thread={thread_id}: {e}")
+async def notify_jotrade_webhook(payload: dict) -> bool:
+    """Relaie un signal réel (ouverture BUY/SELL ou résultat TP1/SL) au webhook JoTrade
+    du bot Sofia. Sofia demande sa propre validation à johnny ('Publier dans Joe Trade ?')
+    puis poste dans VIP (topic Or), Jo trade public et Project inves'T. Retourne True si
+    la requête HTTP a été acceptée (ne garantit pas que johnny a validé la publication)."""
+    if not NEXOS_WEBHOOK_URL:
+        return False
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(NEXOS_WEBHOOK_URL, json=payload)
+            if r.status_code == 200:
+                return True
+            logger.warning(f"notify_jotrade_webhook: HTTP {r.status_code} — {r.text[:200]}")
+            return False
+    except Exception as e:
+        logger.warning(f"notify_jotrade_webhook échec: {e}")
+        return False
 
 def diagnose_trade_rejection(data: dict, ticker: str) -> str:
     """Rejoue les mêmes conditions que open_trade() pour dire précisément
@@ -3065,9 +3063,14 @@ async def trading_loop(app: Application):
                     await app.bot.send_message(JOHN_ID, msg_m, parse_mode="Markdown")
                 except Exception:
                     pass
-                grp_msg_m = format_group_close(info_m['name'], dir_m, pnl_m)
-                _img_m = "trade_gagnant.jpg" if pnl_m > 0 else "trade_perdant.jpg"
-                await post_result_to_all_groups(app.bot, grp_msg_m, _img_m)
+                asset_lbl_m, symbol_lbl_m = NEXOS_ASSET_MAP.get(pos.get("ticker"), (pos.get("ticker", "?"), pos.get("ticker", "?")))
+                qty_m = real_qty(pos)
+                raw_move_m = abs(pnl_m) / qty_m if qty_m else 0.0
+                await notify_jotrade_webhook({
+                    "type": "TP1" if pnl_m > 0 else "SL",
+                    "asset": asset_lbl_m, "symbol": symbol_lbl_m,
+                    ("gain" if pnl_m > 0 else "loss"): raw_move_m,
+                })
                 if pnl_m < 0:
                     asyncio.create_task(post_mortem_analysis(app, pos))
 
@@ -3110,9 +3113,13 @@ async def trading_loop(app: Application):
                         await app.bot.send_message(JOHN_ID, msg, parse_mode="Markdown")
                     except Exception:
                         pass
-                    grp_msg = format_group_close(info['name'], pos['direction'], pnl_e, reason)
-                    _img_e = "trade_gagnant.jpg" if pnl_e > 0 else "trade_perdant.jpg"
-                    await post_result_to_all_groups(app.bot, grp_msg, _img_e)
+                    asset_lbl_e, symbol_lbl_e = NEXOS_ASSET_MAP.get(ticker, (ticker, ticker))
+                    raw_move_e = abs(pos.get("exit_price", pos["entry_price"]) - pos["entry_price"])
+                    await notify_jotrade_webhook({
+                        "type": "TP1" if pnl_e > 0 else "SL",
+                        "asset": asset_lbl_e, "symbol": symbol_lbl_e,
+                        ("gain" if pnl_e > 0 else "loss"): raw_move_e,
+                    })
                     if pnl_e < 0:
                         asyncio.create_task(post_mortem_analysis(app, pos))
 
@@ -3737,33 +3744,24 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_testgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test manuel — vérifie que le bot arrive bien à poster dans les 3 destinations :
-    VIP (trades + résultats), public et Project inves'T (résultats)."""
+    """Test manuel — vérifie que le webhook JoTrade de Sofia répond bien.
+    Sofia gère elle-même le posage dans VIP/Public/Project inves'T après validation."""
     if update.effective_user.id != JOHN_ID:
         return
-
-    destinations = [
-        ("VIP — JO TRADE / Trade XAUUSD", JOETRADE_GROUP_VIP_ID, JOETRADE_THREAD_GOLD_VIP),
-        ("Public — Jo trade public / Acceuil", JOETRADE_GROUP_ID, JOETRADE_THREAD_GOLD),
-        ("Project inves'T / Jo trade", JOETRADE_GROUP_3_ID, JOETRADE_THREAD_GOLD_3),
-    ]
-    test_msg = format_group_open("BUY", "Or (XAU/USD) — TEST", 4100.00, 4090.00, 4120.00)
-
-    lines = []
-    for label, chat_id, thread_id in destinations:
-        if not chat_id:
-            lines.append(f"⚠️ {label} — non configuré")
-            continue
-        kwargs = {} if thread_id == 1 else {"message_thread_id": thread_id}
-        try:
-            await context.bot.send_message(
-                chat_id, test_msg, parse_mode="Markdown", **kwargs
-            )
-            lines.append(f"✅ {label}\nGroupe : `{chat_id}` | Topic : `{thread_id}`")
-        except Exception as e:
-            lines.append(f"❌ {label}\nGroupe : `{chat_id}` | Topic : `{thread_id}`\nErreur : `{e}`")
-
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    ok = await notify_jotrade_webhook({
+        "type": "BUY", "asset": "OR", "symbol": "XAUUSD",
+        "tf": "5", "entry": 4100.00, "tp1": 4120.00, "sl": 4090.00,
+    })
+    if ok:
+        await update.message.reply_text(
+            f"✅ Webhook Sofia OK (`{NEXOS_WEBHOOK_URL}`).\n"
+            f"Va voir tes messages privés — Sofia doit te demander 'Publier dans Joe Trade ?'."
+        , parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"❌ Webhook Sofia injoignable ou erreur.\nURL : `{NEXOS_WEBHOOK_URL}`",
+            parse_mode="Markdown"
+        )
 
 
 async def cmd_testbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3803,12 +3801,14 @@ async def cmd_testbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Entrée : `{pos['entry_price']:.2f}` | SL : `{pos['sl']:.2f}` | TP : `{pos['tp']:.2f}`",
         parse_mode="Markdown"
     )
-    if JOETRADE_GROUP_VIP_ID:
-        try:
-            grp_msg = format_group_open("BUY", "Or (XAU/USD) — TEST 0.01", pos["entry_price"], pos["sl"], pos["tp"])
-            await context.bot.send_message(JOETRADE_GROUP_VIP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD_VIP)
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ Post VIP échoué : {e}")
+    ok = await notify_jotrade_webhook({
+        "type": "BUY", "asset": "OR", "symbol": "XAUUSD",
+        "tf": "5", "entry": pos["entry_price"], "tp1": pos["tp"], "sl": pos["sl"],
+    })
+    await update.message.reply_text(
+        "✅ Signal relayé à Sofia (webhook JoTrade) — attends son message 'Publier ?'." if ok
+        else "⚠️ Webhook Sofia injoignable — trade MT5 ouvert mais rien relayé."
+    )
 
 
 async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3979,12 +3979,11 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         pass
 
-    if JOETRADE_GROUP_VIP_ID:
-        try:
-            grp_msg = format_group_open(direction, sig['info_name'], fresh_price, pos['sl'], pos['tp'])
-            await context.bot.send_message(JOETRADE_GROUP_VIP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD_VIP)
-        except Exception:
-            pass
+    asset_lbl, symbol_lbl = NEXOS_ASSET_MAP.get(sig["ticker"], (sig["ticker"], sig["ticker"]))
+    await notify_jotrade_webhook({
+        "type": direction, "asset": asset_lbl, "symbol": symbol_lbl,
+        "tf": "5", "entry": fresh_price, "tp1": pos["tp"], "sl": pos["sl"],
+    })
 
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
