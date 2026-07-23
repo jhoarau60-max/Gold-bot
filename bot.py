@@ -134,7 +134,7 @@ RISK_PER_TRADE      = 0.01   # 1 % du capital par trade
 MAX_DAILY_LOSS      = 0.045  # 4.5% de perte max par jour = 450$ sur 10k (marge de 50$ sous limite RaiseMyFund 500$/jour)
 MAX_DAILY_GAIN      = 450.0  # cap gain journalier — règle des 45% RaiseMyFund (1 jour ≤ 45% de l'objectif 1000$)
 MAX_POSITION_HOURS  = 6      # timeout auto-close : intraday max 6h (cohérent avec TP ~3×ATR)
-MAX_DAILY_TRADES    = 4      # max 4 trades/jour
+MAX_DAILY_TRADES    = 6      # max 6 trades/jour
 DRAWDOWN_ALERT      = 0.08   # 8% drawdown → risk réduit à 0.5% (seuil d'alerte avant règle prop firm)
 DRAWDOWN_PAUSE      = 0.10   # 10% drawdown → stop total (règle RaiseMyFund : max 10% drawdown global)
 CHALLENGE_OBJECTIVE = 0.10   # +10% = objectif Challenge 1 (1000$ sur 10k) → pause bot jusqu'à /resume_challenge
@@ -596,7 +596,8 @@ def adaptive_params(data: dict) -> dict:
 
     # TP ≈ 2× SL (RR 1:2), atteignable dans la fenêtre MAX_POSITION_HOURS —
     # les anciens tp_mult 5.3–7.2 n'étaient presque jamais atteints avant le timeout.
-    # Risque ≤ 1% par défaut : 4 trades/jour × 1% = 4% < limite daily loss 4.5% RaiseMyFund.
+    # Risque ≤ 1% par défaut : 6 trades/jour × 1% = 6% ; le check MAX_DAILY_LOSS (4.5%)
+    # coupe les nouvelles ouvertures avant ce plafond, quel que soit le nombre de trades.
     if len(recent) < 20:
         base = {"threshold": 5, "risk_per_trade": 0.01, "sl_mult": 1.5, "tp_mult": 3.0, "mode": "démarrage"}
     else:
@@ -1556,7 +1557,7 @@ def open_trade(data: dict, ticker: str, direction: str,
         logger.info(f"Cap gain journalier atteint ({data['daily_pnl']:.2f}$ / limite {MAX_DAILY_GAIN:.2f}$) — reprise demain")
         return None
 
-    # GOLD-E : max 4 trades/jour
+    # GOLD-E : max 6 trades/jour
     if data.get("daily_trades", 0) >= MAX_DAILY_TRADES:
         logger.info(f"Refus {ticker} — max {MAX_DAILY_TRADES} trades/jour atteint ({data['daily_trades']})")
         return None
