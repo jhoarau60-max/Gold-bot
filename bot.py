@@ -1654,6 +1654,35 @@ def open_trade(data: dict, ticker: str, direction: str,
 
     return pos
 
+def format_group_open(direction: str, name: str, price: float, sl: float, tp: float) -> str:
+    """Message d'ouverture pour le groupe — style repris du topic Or (Sofia/JoTrade)."""
+    circle    = "🟢" if direction == "BUY" else "🔴"
+    trend_txt = "HAUSSIER 📈" if direction == "BUY" else "BAISSIER 📉"
+    return (
+        f"⚡ *SIGNAL — {name}*\n\n"
+        f"{circle} {trend_txt}\n"
+        f"🎯 Entrée : `{price:.2f} $`\n"
+        f"🚫 SL : `{sl:.2f} $`\n"
+        f"✅ TP : `{tp:.2f} $`"
+    )
+
+def format_group_close(name: str, direction: str, pnl: float, reason: str = "") -> str:
+    """Message de clôture pour le groupe — style repris du topic Or (Sofia/JoTrade)."""
+    reason_line = f"{reason}\n" if reason else ""
+    if pnl > 0:
+        return (
+            f"✅✅✅ *TRADE GAGNANT !* ✅✅✅\n\n"
+            f"{name} | {direction}\n"
+            f"{reason_line}"
+            f"💰 `{pnl:+.2f} $`"
+        )
+    return (
+        f"❌ *TRADE PERDANT*\n\n"
+        f"{name} | {direction}\n"
+        f"{reason_line}"
+        f"💸 `{pnl:+.2f} $`"
+    )
+
 def diagnose_trade_rejection(data: dict, ticker: str) -> str:
     """Rejoue les mêmes conditions que open_trade() pour dire précisément
     pourquoi un trade validé a été refusé (message Telegram plus clair)."""
@@ -3006,13 +3035,14 @@ async def trading_loop(app: Application):
                     pass
                 if JOETRADE_GROUP_ID:
                     try:
+                        grp_msg_m = format_group_close(info_m['name'], dir_m, pnl_m)
                         import os as _os
                         _img = "trade_gagnant.jpg" if pnl_m > 0 else "trade_perdant.jpg"
                         if _os.path.exists(_img):
                             with open(_img, "rb") as _f:
-                                await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                                await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=grp_msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
                         else:
-                            await app.bot.send_message(JOETRADE_GROUP_ID, msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                            await app.bot.send_message(JOETRADE_GROUP_ID, grp_msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
                     except Exception:
                         pass
                 if pnl_m < 0:
@@ -3059,13 +3089,14 @@ async def trading_loop(app: Application):
                         pass
                     if JOETRADE_GROUP_ID:
                         try:
+                            grp_msg = format_group_close(info['name'], pos['direction'], pnl_e, reason)
                             import os as _os
                             _img = "trade_gagnant.jpg" if pnl_e > 0 else "trade_perdant.jpg"
                             if _os.path.exists(_img):
                                 with open(_img, "rb") as _f:
-                                    await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                                    await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
                             else:
-                                await app.bot.send_message(JOETRADE_GROUP_ID, msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                                await app.bot.send_message(JOETRADE_GROUP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
                         except Exception:
                             pass
                     if pnl_e < 0:
@@ -3862,14 +3893,7 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if JOETRADE_GROUP_ID:
         try:
-            em = "🟢📈" if direction == "BUY" else "🔴📉"
-            grp_msg = (
-                f"{em} *{direction} — {sig['info_name']}*\n"
-                f"⏱ Timeframe : `M5`\n"
-                f"💰 Entrée : `{fresh_price:.2f}`\n"
-                f"🛑 SL : `{pos['sl']:.2f}`\n"
-                f"🎯 TP : `{pos['tp']:.2f}`"
-            )
+            grp_msg = format_group_open(direction, sig['info_name'], fresh_price, pos['sl'], pos['tp'])
             await context.bot.send_message(JOETRADE_GROUP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
         except Exception:
             pass
