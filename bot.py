@@ -3766,6 +3766,51 @@ async def cmd_testgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_testbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trade réel de test — lot minimum (0.01) sur XAUUSD, pour vérifier de bout en bout
+    le routage des messages de groupe (ouverture → VIP, clôture → VIP + public + Project inves'T)."""
+    if update.effective_user.id != JOHN_ID:
+        return
+    ticker = "XAUUSD=X"
+    await update.message.reply_text("🔍 Préparation du trade test (lot minimum 0.01)...")
+
+    df = await fetch_async(ticker)
+    if df is None or len(df) < 20:
+        await update.message.reply_text("❌ Impossible de récupérer le prix/ATR.")
+        return
+    df    = compute_indicators(df)
+    price = float(df["Close"].squeeze().iloc[-1])
+    atr   = float(df["ATR"].iloc[-1])
+    if not atr or atr <= 0 or pd.isna(atr):
+        await update.message.reply_text("❌ ATR invalide.")
+        return
+
+    data = load_data()
+    sl_mult, tp_mult = 1.5, 3.0
+    sl_dist = atr * sl_mult
+    # risk_per_trade calculé pour forcer qty ≈ 1 once = 0.01 lot XAUUSD (contrat 100 oz/lot)
+    risk = (sl_dist / data["capital"]) if data.get("capital", 0) > 0 else 0.0001
+    params = {"sl_mult": sl_mult, "tp_mult": tp_mult, "risk_per_trade": risk}
+
+    pos = open_trade(data, ticker, "BUY", price, atr, score=0, params=params)
+    if not pos or not pos.get("mt5_ticket"):
+        reason = diagnose_trade_rejection(data, ticker) if not pos else "ordre MT5 non confirmé (bridge/algo trading inactif)"
+        await update.message.reply_text(f"❌ Trade test refusé : {reason}")
+        return
+
+    await update.message.reply_text(
+        f"✅ Trade test ouvert — ticket `{pos['mt5_ticket']}` ({pos.get('real_lots')} lots)\n"
+        f"Entrée : `{pos['entry_price']:.2f}` | SL : `{pos['sl']:.2f}` | TP : `{pos['tp']:.2f}`",
+        parse_mode="Markdown"
+    )
+    if JOETRADE_GROUP_VIP_ID:
+        try:
+            grp_msg = format_group_open("BUY", "Or (XAU/USD) — TEST 0.01", pos["entry_price"], pos["sl"], pos["tp"])
+            await context.bot.send_message(JOETRADE_GROUP_VIP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD_VIP)
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Post VIP échoué : {e}")
+
+
 async def cmd_reset_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remet le capital à CAPITAL_INITIAL. Usage: /reset_capital ou /reset_capital 9958.94"""
     if update.effective_user.id != JOHN_ID:
@@ -3952,6 +3997,7 @@ async def main():
     app.add_handler(CommandHandler("signal",  cmd_signal))
     app.add_handler(CommandHandler("myid",         cmd_myid))
     app.add_handler(CommandHandler("testgroup",    cmd_testgroup))
+    app.add_handler(CommandHandler("testbuy",      cmd_testbuy))
     app.add_handler(CommandHandler("reset_capital", cmd_reset_capital))
     app.add_handler(CommandHandler("resume_challenge", cmd_resume_challenge))
     app.add_handler(CommandHandler("propfirm",      cmd_propfirm))
