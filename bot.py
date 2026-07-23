@@ -2985,24 +2985,38 @@ async def trading_loop(app: Application):
                 save_data(data)
                 startup_learned = {}
 
-            # Détecte les positions fermées manuellement dans MT5 (resynchronisation)
+            # Détecte les positions fermées (SL/TP natif MT5 ou fermeture manuelle) —
+            # ce chemin est en pratique le plus fréquent car MT5 exécute le SL/TP
+            # au tick, avant que check_exits() ne le détecte via le polling 5 min.
             data, manually_closed = sync_mt5_positions(data)
             for pos in manually_closed:
-                pnl_m = pos.get("pnl", 0.0)
-                em_m  = "✅" if pnl_m > 0 else "❌"
-                dir_m = pos.get("direction", "")
-                dir_em_m = "🟢📈" if dir_m == "BUY" else "🔴📉"
+                pnl_m  = pos.get("pnl", 0.0)
+                em_m   = "✅" if pnl_m > 0 else "❌"
+                dir_m  = pos.get("direction", "")
+                info_m = instruments.get(pos.get("ticker"), {"name": pos.get("ticker", "?")})
+                msg_m = (
+                    f"{em_m} *{dir_m} — {info_m['name']}*\n"
+                    f"⏱ Timeframe : `M5`\n"
+                    f"💰 Entrée : `{pos.get('entry_price', 0):.2f}`\n"
+                    f"💵 P&L : `{pnl_m:+.2f}$`"
+                )
                 try:
-                    await app.bot.send_message(
-                        JOHN_ID,
-                        f"✋ *Fermeture manuelle — {dir_em_m} {dir_m}*\n"
-                        f"⏱ Timeframe : `M5`\n"
-                        f"💰 Entrée : `{pos.get('entry_price', 0):.2f}`\n"
-                        f"{em_m} P&L : `{pnl_m:+.2f}$`",
-                        parse_mode="Markdown"
-                    )
+                    await app.bot.send_message(JOHN_ID, msg_m, parse_mode="Markdown")
                 except Exception:
                     pass
+                if JOETRADE_GROUP_ID:
+                    try:
+                        import os as _os
+                        _img = "trade_gagnant.jpg" if pnl_m > 0 else "trade_perdant.jpg"
+                        if _os.path.exists(_img):
+                            with open(_img, "rb") as _f:
+                                await app.bot.send_photo(JOETRADE_GROUP_ID, photo=_f, caption=msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                        else:
+                            await app.bot.send_message(JOETRADE_GROUP_ID, msg_m, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
+                    except Exception:
+                        pass
+                if pnl_m < 0:
+                    asyncio.create_task(post_mortem_analysis(app, pos))
 
             # Signaux en attente de validation périmés (10 min sans réponse) → auto-ignorés
             now_ts = time.time()
@@ -3303,7 +3317,8 @@ async def trading_loop(app: Application):
                         f"{em} *Signal {direction} — {info['name']}* (score `{score}/7`)\n"
                         f"⏱ Timeframe : `M5`\n"
                         f"💰 Entrée (approx.) : `{price:.2f}`\n"
-                        f"🛑 SL prévu : `{sl_disp:.2f}`   🎯 TP prévu : `{tp_disp:.2f}`\n\n"
+                        f"🛑 SL prévu : `{sl_disp:.2f}`\n"
+                        f"🎯 TP prévu : `{tp_disp:.2f}`\n\n"
                         f"⏳ En attente de validation (10 min max)"
                     )
                     try:
@@ -3837,7 +3852,8 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         base_text + "\n\n"
         f"✅ *Validé par johnny — trade ouvert !*\n"
         f"💰 Entrée réelle : `{fresh_price:.2f}`\n"
-        f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
+        f"🛑 SL : `{pos['sl']:.2f}`\n"
+        f"🎯 TP : `{pos['tp']:.2f}`"
     )
     try:
         await query.edit_message_text(confirm_txt, parse_mode="Markdown")
@@ -3851,7 +3867,8 @@ async def on_signal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"{em} *{direction} — {sig['info_name']}*\n"
                 f"⏱ Timeframe : `M5`\n"
                 f"💰 Entrée : `{fresh_price:.2f}`\n"
-                f"🛑 SL : `{pos['sl']:.2f}`   🎯 TP : `{pos['tp']:.2f}`"
+                f"🛑 SL : `{pos['sl']:.2f}`\n"
+                f"🎯 TP : `{pos['tp']:.2f}`"
             )
             await context.bot.send_message(JOETRADE_GROUP_ID, grp_msg, parse_mode="Markdown", message_thread_id=JOETRADE_THREAD_GOLD)
         except Exception:
