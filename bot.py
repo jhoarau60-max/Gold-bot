@@ -55,7 +55,7 @@ if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_TOKEN requis")
 JOHN_ID         = int(ENV.get("JOHN_ID", "0"))
 JOETRADE_GROUP_ID = int(ENV.get("JOETRADE_GROUP_ID", "-1003942074689"))
-JOETRADE_THREAD_GOLD = 40
+JOETRADE_THREAD_GOLD = 3   # topic "Information traiding" dans Jo trade public (vérifié via lien Telegram)
 
 # Validation manuelle des trades — le bot propose, johnny valide avant ouverture réelle.
 SIGNAL_VALIDATION_TIMEOUT = 10 * 60  # 10 minutes
