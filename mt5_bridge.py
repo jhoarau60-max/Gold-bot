@@ -303,6 +303,54 @@ def modify_position():
     return jsonify({"error": err, "retcode": result.retcode if result else None}), 500
 
 
+TIMEFRAME_MAP = {
+    "5m":  mt5.TIMEFRAME_M5,
+    "15m": mt5.TIMEFRAME_M15,
+    "1h":  mt5.TIMEFRAME_H1,
+    "4h":  mt5.TIMEFRAME_H4,
+    "1d":  mt5.TIMEFRAME_D1,
+}
+
+
+@app.route("/candles", methods=["GET"])
+def candles():
+    """Bougies OHLC en direct depuis MT5 (Gold + Silver) — source la plus fiable
+    car ce sont les vraies cotations du broker (RaiseGlobalSA), pas un flux tiers."""
+    if request.headers.get("X-Token") != SECRET_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    ticker    = request.args.get("ticker", "XAUUSD=X")
+    interval  = request.args.get("interval", "5m")
+    count     = int(request.args.get("count", 300))
+
+    if not ensure_mt5():
+        return jsonify({"error": "MT5 non disponible"}), 500
+
+    symbol = resolve_symbol(ticker)
+    if not symbol:
+        return jsonify({"error": f"Aucun symbole pour {ticker} chez ce broker"}), 400
+
+    if not mt5.symbol_select(symbol, True):
+        return jsonify({"error": f"Symbole {symbol} introuvable dans MT5"}), 400
+
+    tf = TIMEFRAME_MAP.get(interval, mt5.TIMEFRAME_M5)
+    rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+    if rates is None or len(rates) < 10:
+        logger.warning(f"/candles {ticker} ({symbol}): pas assez de données ({mt5.last_error()})")
+        return jsonify({"error": "pas assez de données"}), 500
+
+    out = [{
+        "time":   int(r["time"]),
+        "open":   float(r["open"]),
+        "high":   float(r["high"]),
+        "low":    float(r["low"]),
+        "close":  float(r["close"]),
+        "volume": int(r["tick_volume"]),
+    } for r in rates]
+
+    return jsonify({"ok": True, "symbol": symbol, "candles": out})
+
+
 @app.route("/positions_status", methods=["POST"])
 def positions_status():
     """Vérifie si des tickets (positions ouvertes côté bot) sont toujours ouverts dans MT5,

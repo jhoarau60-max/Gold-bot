@@ -92,6 +92,7 @@ logger.info(f"OANDA configuré: account={bool(OANDA_ACCOUNT_ID)} token={bool(OAN
 MT5_BRIDGE_URL   = ENV.get("MT5_BRIDGE_URL", "").rstrip("/")   # ex: https://xxxx.trycloudflare.com
 MT5_BRIDGE_TOKEN = ENV.get("MT5_BRIDGE_TOKEN", "")
 MT5_INST_MAP     = {"XAUUSD=X": "XAUUSD", "XAGUSD=X": "XAGUSD"}
+MT5_COUNT_MAP    = {"5m": 300, "15m": 300, "1h": 300, "4h": 300, "1d": 300}
 logger.info(f"MT5 Bridge configuré: url={bool(MT5_BRIDGE_URL)} token={bool(MT5_BRIDGE_TOKEN)}")
 
 TWELVEDATA_KEY   = ENV.get("TWELVEDATA_KEY", "")
@@ -983,13 +984,17 @@ def get_1h_trend(df_base: pd.DataFrame) -> str:
 _4h_cache_gold: dict = {}
 
 def get_4h_trend(ticker: str) -> str:
-    """Tendance 4H Twelve Data (cache 4H). Filtre macro fiable — évite contre-tendance multi-jours."""
+    """Tendance 4H (cache 4H). Filtre macro fiable — évite contre-tendance multi-jours.
+    MT5 bridge en priorité (fiable pour XAU ET XAG) ; Twelve Data en fallback
+    (utile seulement pour XAU — TD bloque XAG sans plan payant)."""
     import time as _time
     now = _time.time()
     cached = _4h_cache_gold.get(ticker, {})
     if now - cached.get("ts", 0) < 14400:
         return cached.get("trend", "NEUTRAL")
-    df = fetch_twelvedata_candles(ticker, count=100, interval="4h")
+    df = fetch_mt5_candles(ticker, count=100, interval="4h")
+    if df is None or len(df) < 30:
+        df = fetch_twelvedata_candles(ticker, count=100, interval="4h")
     if df is None or len(df) < 30:
         _4h_cache_gold[ticker] = {"trend": "NEUTRAL", "ts": now}
         return "NEUTRAL"
@@ -1007,8 +1012,50 @@ def get_4h_trend(ticker: str) -> str:
     logger.info(f"Tendance 4H {ticker}: {trend} (close={close:.2f} EMA21={ema21:.2f} EMA50={ema50:.2f})")
     return trend
 
+def fetch_mt5_candles(ticker: str, count: int = 300, interval: str = "5m") -> pd.DataFrame | None:
+    """Bougies OHLC en direct depuis MT5 (bridge local sur le PC de johnny) — source
+    prioritaire pour XAU/XAG : ce sont les vraies cotations du broker (RaiseGlobalSA),
+    fiables pour Gold ET Silver, contrairement à Twelve Data (plan payant requis
+    pour XAG/USD, cf. commentaire WEEKDAY_INSTRUMENTS)."""
+    if not MT5_BRIDGE_URL or not MT5_BRIDGE_TOKEN or ticker not in MT5_INST_MAP:
+        return None
+    try:
+        import httpx as _httpx
+        r = _httpx.get(
+            f"{MT5_BRIDGE_URL}/candles",
+            headers={"X-Token": MT5_BRIDGE_TOKEN},
+            params={"ticker": ticker, "interval": interval, "count": count},
+            timeout=10
+        )
+        if r.status_code != 200:
+            logger.warning(f"MT5 bridge candles {ticker}: HTTP {r.status_code} {r.text[:150]}")
+            return None
+        rows = r.json().get("candles", [])
+        if len(rows) < 10:
+            return None
+        df = pd.DataFrame([{
+            "Open": c["open"], "High": c["high"], "Low": c["low"],
+            "Close": c["close"], "Volume": c["volume"],
+        } for c in rows])
+        df.index = pd.to_datetime([c["time"] for c in rows], unit="s")
+        logger.info(f"MT5 bridge fetch OK: {ticker} — {len(df)} bougies temps réel")
+        return df
+    except Exception as e:
+        logger.warning(f"fetch_mt5_candles {ticker}: {e}")
+        return None
+
+
 def fetch(ticker: str, period: str = "5d", interval: str = "5m") -> pd.DataFrame | None:
-    # Twelve Data — priorité maximale (temps réel, pas de rate limit agressif)
+    # MT5 bridge — priorité absolue pour XAU/XAG : vraies cotations du broker,
+    # dispo pour Gold ET Silver (contrairement à Twelve Data qui bloque XAG).
+    if ticker in MT5_INST_MAP:
+        count = MT5_COUNT_MAP.get(interval, 300)
+        df = fetch_mt5_candles(ticker, count=count, interval=interval)
+        if df is not None and len(df) >= 10:
+            return df
+        logger.warning(f"MT5 bridge fetch raté pour {ticker} — fallback Twelve Data")
+
+    # Twelve Data — 2e priorité (temps réel, pas de rate limit agressif)
     if ticker in TD_INST_MAP and TWELVEDATA_KEY:
         td_interval = TD_INTERVAL_MAP.get(interval, "5min")
         count = TD_COUNT_MAP.get((period, interval), 300)
