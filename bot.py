@@ -1275,6 +1275,62 @@ def _in_ote(price: float, lvls: dict, atr: float, trend: str) -> tuple[bool, str
         return True, "✅ Prix en zone OTE (61.8%–78.6%)"
     return False, ""
 
+def find_liquidity_targets(df: pd.DataFrame, direction: str, price: float, atr: float,
+                            count: int = 4, lookback: int = 200) -> list[float]:
+    """Détecte les prochaines zones de liquidité (anciens swing highs/lows — là où les
+    stops des autres traders sont regroupés) sur le chemin du trade, pour servir de
+    TP1..TPn au lieu de simples multiples d'ATR fixes. Complète avec des paliers ATR
+    si moins de `count` niveaux réels sont trouvés (marché sans structure proche)."""
+    recent = df.tail(lookback).reset_index(drop=True)
+    n = len(recent)
+    pivots: list[float] = []
+    win = 5  # bar pivot = extrême local sur `win` bougies de chaque côté
+
+    if direction == "BUY":
+        highs = recent["High"]
+        for i in range(win, n - win):
+            h = float(highs.iloc[i])
+            if h <= price:
+                continue
+            if h == float(highs.iloc[i - win:i + win + 1].max()):
+                pivots.append(h)
+    else:
+        lows = recent["Low"]
+        for i in range(win, n - win):
+            l = float(lows.iloc[i])
+            if l >= price:
+                continue
+            if l == float(lows.iloc[i - win:i + win + 1].min()):
+                pivots.append(l)
+
+    # Dédoublonne les niveaux trop proches (< 0.4×ATR d'écart) et trie par proximité
+    pivots.sort()
+    merged: list[float] = []
+    for lvl in pivots:
+        if not merged or abs(lvl - merged[-1]) > atr * 0.4:
+            merged.append(lvl)
+    if direction == "BUY":
+        merged.sort()  # ascendant — le plus proche du prix d'abord
+    else:
+        merged.sort(reverse=True)
+
+    targets = merged[:count]
+
+    # Complète avec des paliers ATR si pas assez de vraies zones de liquidité détectées
+    step = 1
+    while len(targets) < count:
+        base = targets[-1] if targets else price
+        atr_mult = 1.5 + 1.2 * step
+        filler = base + atr * 1.2 if direction == "BUY" and targets else (
+            price + atr * atr_mult if direction == "BUY" else
+            (base - atr * 1.2 if targets else price - atr * atr_mult)
+        )
+        targets.append(filler)
+        step += 1
+
+    return [round(t, 5) for t in targets[:count]]
+
+
 def _detect_fvg(df: pd.DataFrame, lookback: int = 30) -> tuple[bool, bool, str]:
     recent = df.tail(lookback).reset_index(drop=True)
     price = float(recent["Close"].iloc[-1])
@@ -1716,6 +1772,155 @@ def open_trade(data: dict, ticker: str, direction: str,
             logger.error(f"Supabase insert trade: {e}")
 
     return pos
+
+
+TP_SPLIT_RATIOS = [0.40, 0.30, 0.20, 0.10]  # TP1..TP4 — dégressif, sécurise vite l'essentiel
+
+def open_trade_multi(data: dict, ticker: str, direction: str, price: float, atr: float,
+                      score: int, df: pd.DataFrame, params: dict = None) -> list[dict] | None:
+    """Ouvre un trade en 4 tickets MT5 séparés (même SL, TP échelonnés sur les prochaines
+    zones de liquidité réelles) — 40/30/20/10% du lot. Dès que TP1 est touché, les 3 autres
+    passent au breakeven (cf. apply_group_breakeven, appelé depuis trading_loop)."""
+    if ticker in PRICE_BOUNDS:
+        lo, hi = PRICE_BOUNDS[ticker]
+        if not (lo <= price <= hi):
+            logger.error(f"Prix aberrant {ticker}: {price:.2f} (attendu {lo}–{hi}) — trade annulé")
+            return None
+
+    if data.get("challenge_paused"):
+        logger.info("Challenge en pause (objectif atteint) — trade refusé")
+        return None
+    if data["daily_pnl"] <= -(CAPITAL_INITIAL * MAX_DAILY_LOSS):
+        logger.info(f"Limite perte journalière atteinte ({data['daily_pnl']:.2f}$)")
+        return None
+    if data["daily_pnl"] >= MAX_DAILY_GAIN:
+        logger.info(f"Cap gain journalier atteint ({data['daily_pnl']:.2f}$)")
+        return None
+    if data.get("daily_trades", 0) >= MAX_DAILY_TRADES:
+        logger.info(f"Refus {ticker} — max {MAX_DAILY_TRADES} trades/jour atteint")
+        return None
+    dd = get_drawdown(data)
+    if dd >= DRAWDOWN_PAUSE:
+        logger.warning(f"Drawdown {dd:.1%} >= {DRAWDOWN_PAUSE:.0%} — pause obligatoire")
+        return None
+    for p in data["open_positions"]:
+        if p["ticker"] == ticker:
+            return None
+
+    sl_mult = params["sl_mult"]        if params else 1.5
+    risk    = params["risk_per_trade"] if params else RISK_PER_TRADE
+    if dd >= DRAWDOWN_ALERT:
+        risk = min(risk, 0.005)
+        logger.info(f"Drawdown {dd:.1%} — risk réduit à {risk:.1%}")
+
+    sl_dist   = atr * sl_mult
+    sl        = price - sl_dist if direction == "BUY" else price + sl_dist
+    total_qty = round((data["capital"] * risk) / sl_dist, 6)
+    if total_qty <= 0:
+        return None
+
+    tp_targets = find_liquidity_targets(df, direction, price, atr, count=4)
+    group_id   = uuid.uuid4().hex[:10]
+    legs: list[dict] = []
+
+    for i, (ratio, tp_i) in enumerate(zip(TP_SPLIT_RATIOS, tp_targets), start=1):
+        leg_qty = round(total_qty * ratio, 6)
+        if leg_qty <= 0:
+            continue
+        pos = {
+            "ticker":           ticker,
+            "direction":        direction,
+            "entry_price":      round(price, 5),
+            "sl":               round(sl, 5),
+            "tp":               round(tp_i, 5),
+            "qty":              leg_qty,
+            "score":            score,
+            "entry_time":       datetime.now(TZ).isoformat(),
+            "pnl":              0.0,
+            "oanda_id":         None,
+            "mt5_ticket":       None,
+            "atr_entry":        atr,
+            "sl_mult":          sl_mult,
+            "trail_peak":       price,
+            "trailing_active":  False,
+            "group_id":         group_id,
+            "tp_level":         i,
+        }
+
+        if ticker in MT5_INST_MAP:
+            if not MT5_BRIDGE_URL:
+                logger.warning(f"Bridge MT5 non configuré — {ticker} TP{i} non exécuté")
+                pos["signal_only"] = True
+                legs.append(pos)
+                continue
+            mt5_res = place_mt5_order(ticker, direction, leg_qty, round(sl, 5), round(tp_i, 5))
+            if not mt5_res:
+                logger.warning(f"Ordre MT5 échoué {ticker} TP{i} — jambe ignorée")
+                continue
+            mt5_ticket, real_lots = mt5_res
+            pos["mt5_ticket"] = mt5_ticket
+            pos["real_lots"]  = real_lots
+            logger.info(f"Ordre MT5 confirmé TP{i}/{len(tp_targets)}: ticket={mt5_ticket} ({real_lots} lots) TP={tp_i:.2f}")
+        elif ticker in OANDA_INST_MAP and OANDA_TOKEN:
+            oanda_id = place_oanda_order(ticker, direction, leg_qty, round(sl, 5), round(tp_i, 5))
+            if oanda_id:
+                pos["oanda_id"] = oanda_id
+
+        legs.append(pos)
+
+    if not legs:
+        return None
+
+    data["open_positions"].extend(legs)
+    data["daily_trades"] += 1  # le groupe entier compte pour 1 trade
+    save_data(data)
+
+    if sb_client:
+        for pos in legs:
+            row = {
+                "bot":         TICKER_TO_BOT.get(ticker, "gold"),
+                "symbol":      ticker,
+                "direction":   direction,
+                "price_entry": round(price, 5),
+                "sl":          round(sl, 5),
+                "tp":          round(pos["tp"], 5),
+                "qty":         round(pos["qty"], 6),
+                "score":       score,
+                "status":      "open",
+                "opened_at":   datetime.now(TZ).isoformat(),
+            }
+            try:
+                try:
+                    res = sb_client.table("trade_history").insert(
+                        {**row, "mt5_ticket": pos.get("mt5_ticket")}
+                    ).execute()
+                except Exception:
+                    res = sb_client.table("trade_history").insert(row).execute()
+                if res.data:
+                    pos["supabase_id"] = res.data[0]["id"]
+            except Exception as e:
+                logger.error(f"Supabase insert trade (multi-TP): {e}")
+        save_data(data)
+
+    return legs
+
+
+def apply_group_breakeven(data: dict, group_id: str, entry_price: float) -> None:
+    """Dès que TP1 est touché, remonte le SL des jambes restantes du même groupe
+    au prix d'entrée — le reste de la position ne peut plus repasser en perte."""
+    for pos in data["open_positions"]:
+        if pos.get("group_id") != group_id or pos.get("be_applied"):
+            continue
+        new_sl = round(entry_price, 5)
+        ticket = pos.get("mt5_ticket")
+        ok = modify_mt5_sl(ticket, new_sl, pos.get("tp")) if ticket else True
+        if ok:
+            pos["sl"] = new_sl
+            pos["be_applied"] = True
+            logger.info(f"Breakeven appliqué — ticket {ticket} (groupe {group_id}) SL → {new_sl}")
+        else:
+            logger.warning(f"Breakeven échoué — ticket {ticket} (groupe {group_id})")
+
 
 def format_group_open(direction: str, name: str, price: float, sl: float, tp: float) -> str:
     """Message d'ouverture pour le groupe — style repris du topic Or (Sofia/JoTrade)."""
@@ -3105,6 +3310,17 @@ async def trading_loop(app: Application):
                 em_m   = "✅" if pnl_m > 0 else "❌"
                 dir_m  = pos.get("direction", "")
                 info_m = instruments.get(pos.get("ticker"), {"name": pos.get("ticker", "?")})
+                if pos.get("group_id") and pos.get("tp_level") == 1 and pnl_m > 0:
+                    apply_group_breakeven(data, pos["group_id"], pos["entry_price"])
+                    save_data(data)
+                    try:
+                        await app.bot.send_message(
+                            JOHN_ID,
+                            f"🔒 *TP1 touché — {info_m['name']}* : SL des jambes restantes remonté au breakeven.",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
                 msg_m = (
                     f"{em_m} *{dir_m} — {info_m['name']}*\n"
                     f"⏱ Timeframe : `M5`\n"
@@ -3153,6 +3369,17 @@ async def trading_loop(app: Application):
                     pnl_e   = pos.get("pnl", 0)
                     outcome = 1 if pnl_e > 0 else 0
                     update_trade_outcome(pos.get("supabase_id", ""), outcome, pnl_e)
+                    if pos.get("group_id") and pos.get("tp_level") == 1 and pnl_e > 0:
+                        apply_group_breakeven(data, pos["group_id"], pos["entry_price"])
+                        save_data(data)
+                        try:
+                            await app.bot.send_message(
+                                JOHN_ID,
+                                f"🔒 *TP1 touché — {info['name']}* : SL des jambes restantes remonté au breakeven.",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
                     em  = "✅" if pnl_e > 0 else "❌"
                     msg = (
                         f"{em} *{pos['direction']} — {info['name']}*\n"
@@ -4014,30 +4241,37 @@ async def execute_pending_signal(app, signal_id: str) -> dict:
         except Exception:
             pass
 
-    pos = open_trade(data, ticker, direction, fresh_price, fresh_atr, sig["score"], params=sig["params"])
+    legs = open_trade_multi(data, ticker, direction, fresh_price, fresh_atr, sig["score"], fresh_df, params=sig["params"])
 
-    if not pos:
+    if not legs:
         return {"ok": False, "error": diagnose_trade_rejection(data, ticker)}
-    if pos.get("signal_only"):
+    if all(leg.get("signal_only") for leg in legs):
         return {"ok": False, "error": "MT5 inactif/injoignable, aucun ordre réel passé"}
 
     if sig.get("feats_final"):
-        log_trade_features(sig["feats_final"], pos.get("supabase_id", ""))
+        log_trade_features(sig["feats_final"], legs[0].get("supabase_id", ""))
 
     try:
+        tp_lines = "\n".join(
+            f"🎯 TP{leg['tp_level']} : `{leg['tp']:.2f}`  ({leg['qty']:.4f} oz — {int(TP_SPLIT_RATIOS[leg['tp_level']-1]*100)}%)"
+            for leg in sorted(legs, key=lambda x: x["tp_level"])
+        )
         await app.bot.send_message(
             JOHN_ID,
-            f"✅ *Validé via Sofia — trade ouvert !*\n"
+            f"✅ *Validé via Sofia — trade ouvert (4 jambes) !*\n"
             f"{sig.get('info_name', ticker)} — {direction}\n"
             f"💰 Entrée réelle : `{fresh_price:.2f}`\n"
-            f"🛑 SL : `{pos['sl']:.2f}`\n"
-            f"🎯 TP : `{pos['tp']:.2f}`",
+            f"🛑 SL (commun) : `{legs[0]['sl']:.2f}`\n"
+            f"{tp_lines}\n\n"
+            f"_Dès que TP1 est touché, le SL des jambes restantes passe au breakeven._",
             parse_mode="Markdown"
         )
     except Exception:
         pass
 
-    return {"ok": True, "ticket": pos.get("mt5_ticket"), "entry": pos["entry_price"], "sl": pos["sl"], "tp": pos["tp"]}
+    first = legs[0]
+    return {"ok": True, "ticket": first.get("mt5_ticket"), "entry": first["entry_price"],
+            "sl": first["sl"], "tp": [leg["tp"] for leg in sorted(legs, key=lambda x: x["tp_level"])]}
 
 
 async def start_exec_webhook(app):
