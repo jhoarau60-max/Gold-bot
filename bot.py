@@ -4258,7 +4258,7 @@ async def execute_pending_signal(app, signal_id: str) -> dict:
         )
         await app.bot.send_message(
             JOHN_ID,
-            f"✅ *Validé via Sofia — trade ouvert (4 jambes) !*\n"
+            f"✅ *Validé via JoTrade — trade ouvert (4 jambes) !*\n"
             f"{sig.get('info_name', ticker)} — {direction}\n"
             f"💰 Entrée réelle : `{fresh_price:.2f}`\n"
             f"🛑 SL (commun) : `{legs[0]['sl']:.2f}`\n"
@@ -4293,7 +4293,7 @@ async def start_exec_webhook(app):
         if not result.get("ok"):
             try:
                 await app.bot.send_message(
-                    JOHN_ID, f"❌ Validé via Sofia mais trade refusé : {result.get('error')}",
+                    JOHN_ID, f"❌ Validé via JoTrade mais trade refusé : {result.get('error')}",
                     parse_mode="Markdown"
                 )
             except Exception:
