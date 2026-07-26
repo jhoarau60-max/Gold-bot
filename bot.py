@@ -1579,9 +1579,20 @@ def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | No
         logger.info(f"Signal bloqué — ADX trop faible ({adx:.1f}) : marché en range, pas de trade")
         return None, max(score_buy, score_sell), []
 
+    # Filtre Support/Résistance obligatoire — on ne trade QUE collé à un vrai plus haut ou
+    # plus bas récent (60 bougies), jamais au milieu du range même si le score est bon.
+    # "Vrai" niveau = extrême du swing, pas un retracement interne.
+    sr_zone_mult             = 1.2
+    sr_high, sr_low          = _find_swing(df, lookback=60)
+    near_support    = atr > 0 and c <= sr_low  + atr * sr_zone_mult
+    near_resistance = atr > 0 and c >= sr_high - atr * sr_zone_mult
+
     # Filtre EMA200 obligatoire — trade UNIQUEMENT dans le sens de la tendance principale,
     # SAUF si un CHoCH confirme que la structure vient de s'inverser (retournement réel en cours)
     if score_buy >= threshold and score_buy > score_sell:
+        if not near_support:
+            logger.info(f"BUY bloqué — prix ({c:.2f}) pas collé au support récent ({sr_low:.2f}) : pas de vrai niveau")
+            return None, score_buy, []
         if c < ema200 and choch_dir != "BULL_CHOCH":
             logger.info(f"BUY bloqué — prix ({c:.2f}) sous EMA200 ({ema200:.2f}) : contre-tendance")
             return None, score_buy, []
@@ -1589,6 +1600,9 @@ def compute_signal_score(df: pd.DataFrame, threshold: int = 5) -> tuple[str | No
             logger.info(f"BUY autorisé contre-EMA200 ({c:.2f} < {ema200:.2f}) — CHoCH haussier confirmé")
         return "BUY", min(score_buy, 7), reasons_buy
     elif score_sell >= threshold and score_sell > score_buy:
+        if not near_resistance:
+            logger.info(f"SELL bloqué — prix ({c:.2f}) pas collé à la résistance récente ({sr_high:.2f}) : pas de vrai niveau")
+            return None, score_sell, []
         if c > ema200 and choch_dir != "BEAR_CHOCH":
             logger.info(f"SELL bloqué — prix ({c:.2f}) au-dessus EMA200 ({ema200:.2f}) : contre-tendance")
             return None, score_sell, []
