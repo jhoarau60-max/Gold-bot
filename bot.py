@@ -4253,7 +4253,7 @@ async def execute_pending_signal(app, signal_id: str) -> dict:
 
     try:
         tp_lines = "\n".join(
-            f"🎯 TP{leg['tp_level']} : `{leg['tp']:.2f}`  ({leg['qty']:.4f} oz — {int(TP_SPLIT_RATIOS[leg['tp_level']-1]*100)}%)"
+            f"🎯 TP{leg['tp_level']} : `{leg['tp']:.2f}`  ({int(TP_SPLIT_RATIOS[leg['tp_level']-1]*100)}%)"
             for leg in sorted(legs, key=lambda x: x["tp_level"])
         )
         await app.bot.send_message(
